@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto'
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { InputSnapshot } from '~/shared/types/excel-input'
-import type { RunResult } from '~/shared/types/run'
+import type { RunResult, RunSummary } from '~/shared/types/run'
 import { projectIdSchema } from './validation'
 
 export class RunNotFoundError extends Error {}
@@ -57,6 +57,44 @@ export class RunStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RunNotFoundError('検査結果が見つかりません')
       throw error
     }
+  }
+
+  async list(projectId: string): Promise<RunSummary[]> {
+    const directory = join(this.projectsDir, projectId, 'runs')
+    let entries
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+    const results = (await Promise.all(entries
+      .filter(entry => entry.isDirectory() && projectIdSchema.safeParse(entry.name).success)
+      .map(async (entry) => {
+        try {
+          return await this.get(projectId, entry.name)
+        } catch (error) {
+          // A concurrent run creation may expose its directory just before the
+          // initial atomic result file is visible. The next poll will include it.
+          if (error instanceof RunNotFoundError) return undefined
+          throw error
+        }
+      }))).filter((result): result is RunResult => result !== undefined)
+
+    return results
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map(result => ({
+        runId: result.runId,
+        status: result.status,
+        createdAt: result.createdAt,
+        startedAt: result.startedAt,
+        finishedAt: result.finishedAt,
+        updatedAt: result.updatedAt,
+        totalPages: result.input.uniqueUrlCount,
+        completedPages: result.pages.length,
+        summary: result.summary,
+        fatalError: result.fatalError,
+      }))
   }
 }
 

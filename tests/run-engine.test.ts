@@ -127,6 +127,16 @@ describe('Phase 3実行基盤', () => {
     const persisted = JSON.parse(await readFile(join(projectStore.projectsDir, project.projectId, 'runs', result.runId, 'result.json'), 'utf8'))
     expect(persisted.status).toBe('completed')
     expect(persisted.fatalError).toBeUndefined()
+
+    const history = await runStore.list(project.projectId)
+    expect(history).toHaveLength(1)
+    expect(history[0]).toMatchObject({
+      runId: result.runId,
+      status: 'completed',
+      totalPages: 2,
+      completedPages: 2,
+      summary: { ng: 1, unchecked: 5 },
+    })
   })
 })
 

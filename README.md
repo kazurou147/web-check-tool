@@ -1,6 +1,6 @@
 # Webサイト納品前チェックツール
 
-Windows 11上で自分専用に使う、Nuxt 3製のローカルWebアプリです。現在は仕様書Ver.1.1のPhase 3（案件管理、Excel入力、Webサイト機械検査）まで実装しています。検査の進捗・結果・履歴画面はPhase 4の対象です。
+Windows 11上で自分専用に使う、Nuxt 3製のローカルWebアプリです。現在は仕様書Ver.1.1のPhase 4（案件管理、Excel入力、Webサイト機械検査、進捗・結果・履歴表示）まで実装しています。
 
 ## 必要環境
 
@@ -41,8 +41,11 @@ ExcelJSは保存済み行の`hidden`状態を読み取れるため、手動非�
 ## Phase 3 機械検査API
 
 - `POST /api/projects/:projectId/runs`: Excelを再読込して検査を開始
+- `GET /api/projects/:projectId/runs`: 保存済みの検査履歴を取得
 - `GET /api/projects/:projectId/runs/:runId`: 途中結果または完了結果を取得
 
 検査はPlaywright ChromiumでJavaScript描画後DOMを取得し、title・description、Googleタグ、リンク、PC・スマートフォン画像を判定します。アプリ全体で同時に1ジョブ、案件設定内で1〜3ページ並列です。アクセス前のDNS検証、各リダイレクトの再検証、ローカル・私設IPの既定拒否、GET/HEAD制限、時間・サイズ・リダイレクト上限を適用します。ローカル・私設IPが必要な案件だけ、設定画面でホストを明示許可してください。
 
-Phase 4の進捗・結果・履歴画面、Phase 5のOpenAI連携、Phase 6のExcelレポート出力は未実装です。
+案件詳細画面では検査開始、2秒間隔の進捗更新、判定集計、ページ別の期待値・実測値・根拠、Googleタグ・リンク・画像の詳細、過去履歴を確認できます。画面更新後も保存済みrunを再読込します。
+
+Phase 5のOpenAI連携とPhase 6のExcelレポート出力は未実装です。

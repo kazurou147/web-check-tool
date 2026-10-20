@@ -157,6 +157,11 @@ export interface RunSummary {
   runId: string
   status: RunStatus
   createdAt: string
+  startedAt?: string
   finishedAt?: string
+  updatedAt: string
+  totalPages: number
+  completedPages: number
   summary: RunResult['summary']
+  fatalError?: SafeError
 }

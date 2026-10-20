@@ -65,7 +65,7 @@ function getErrorMessage(caught: unknown): string {
 </script>
 
 <template>
-  <section class="narrow stack spacious">
+  <section class="project-detail stack spacious">
     <p v-if="error" class="notice error">案件を読み込めませんでした。</p>
     <template v-else-if="data?.project">
       <div class="page-heading">
@@ -108,6 +108,12 @@ function getErrorMessage(caught: unknown): string {
         v-if="data.project.excelFileName"
         :key="previewKey"
         :project-id="projectId"
+      />
+
+      <InspectionRuns
+        :project-id="projectId"
+        :archived="Boolean(data.project.archivedAt)"
+        :has-excel="Boolean(data.project.excelFileName)"
       />
     </template>
   </section>
