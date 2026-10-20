@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Project, ProjectSettings, ProjectView } from '~/shared/types/project'
+import { defaultProjectSettings } from '~/shared/types/project'
 import { projectIdSchema } from './validation'
 import { SecretVault } from './secret-vault'
 
@@ -30,6 +31,10 @@ export class ProjectStore {
     return join(this.projectDir(projectId), 'input', 'current.xlsx')
   }
 
+  runsPath(projectId: string): string {
+    return join(this.projectDir(projectId), 'runs')
+  }
+
   async create(name: string, settings: ProjectSettings): Promise<Project> {
     const projectId = randomUUID()
     const now = new Date().toISOString()
@@ -56,7 +61,16 @@ export class ProjectStore {
       if (project.schemaVersion !== 1 || project.projectId !== projectId) {
         throw new Error('案件データの形式が不正です')
       }
-      return project
+      const defaults = defaultProjectSettings()
+      return {
+        ...project,
+        settings: {
+          ...defaults,
+          ...project.settings,
+          allowedPrivateHosts: project.settings.allowedPrivateHosts ?? [],
+          auth: { ...defaults.auth, ...project.settings.auth },
+        },
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new ProjectNotFoundError('案件が見つかりません')

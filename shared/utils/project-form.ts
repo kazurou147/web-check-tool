@@ -44,6 +44,7 @@ function copyProjectSettings(settings: ProjectSettings): ProjectSettings {
   return {
     pageConcurrency: settings.pageConcurrency,
     navigationTimeoutMs: settings.navigationTimeoutMs,
+    allowedPrivateHosts: [...(settings.allowedPrivateHosts ?? [])],
     auth: {
       mode: settings.auth.mode,
       loginUrl: settings.auth.loginUrl,

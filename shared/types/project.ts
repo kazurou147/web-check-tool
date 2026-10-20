@@ -3,6 +3,7 @@ export type AuthMode = 'none' | 'basic' | 'form'
 export interface ProjectSettings {
   pageConcurrency: 1 | 2 | 3
   navigationTimeoutMs: number
+  allowedPrivateHosts: string[]
   auth: {
     mode: AuthMode
     loginUrl: string
@@ -42,6 +43,7 @@ export interface ProjectMutationInput {
 export const defaultProjectSettings = (): ProjectSettings => ({
   pageConcurrency: 3,
   navigationTimeoutMs: 30_000,
+  allowedPrivateHosts: [],
   auth: {
     mode: 'none',
     loginUrl: '',

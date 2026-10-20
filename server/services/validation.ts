@@ -30,6 +30,8 @@ const authSettingsSchema = z.discriminatedUnion('mode', [
 export const projectSettingsSchema = z.object({
   pageConcurrency: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   navigationTimeoutMs: z.number().int().min(1_000).max(120_000),
+  allowedPrivateHosts: z.array(z.string().trim().min(1).max(253)
+    .regex(/^(?:\[[0-9a-f:]+\]|[0-9a-z.-]+)$/i, 'ホスト名だけを入力してください')).max(50).default([]),
   auth: authSettingsSchema,
 })
 

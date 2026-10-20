@@ -24,6 +24,7 @@ describe('ProjectFormの送信データ', () => {
       settings: {
         pageConcurrency: 2,
         navigationTimeoutMs: 45_000,
+        allowedPrivateHosts: [],
         auth: {
           mode: 'basic',
           loginUrl: '',
@@ -56,6 +57,7 @@ describe('ProjectFormの送信データ', () => {
       settings: {
         pageConcurrency: 3,
         navigationTimeoutMs: 30_000,
+        allowedPrivateHosts: [],
         auth: {
           mode: 'form',
           loginUrl: 'https://example.com/login',

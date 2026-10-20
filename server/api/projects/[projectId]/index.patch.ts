@@ -11,8 +11,11 @@ export default defineEventHandler(async (event) => {
   try {
     const current = await store.get(projectId)
     const mode = input.settings.auth.mode
-    if (mode !== 'none' && !input.secrets?.[mode] && !(await store.vault.exists(projectId))) {
-      throw createError({ statusCode: 400, statusMessage: '認証を使用する場合はユーザー名とパスワードが必要です' })
+    if (mode !== 'none' && !input.secrets?.[mode]) {
+      const stored = await store.vault.exists(projectId) ? await store.vault.read(projectId) : {}
+      if (!stored[mode]) {
+        throw createError({ statusCode: 400, statusMessage: '選択した認証方式のユーザー名とパスワードが必要です' })
+      }
     }
     if (input.secrets) parseEncryptionKey(process.env.APP_ENCRYPTION_KEY)
     if (current.archivedAt) throw new ArchivedProjectError('アーカイブ中の案件は編集できません')

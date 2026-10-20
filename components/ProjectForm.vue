@@ -40,6 +40,17 @@ function submit() {
       </label>
     </div>
 
+    <label>
+      ローカル・私設IPへの明示許可ホスト（1行1件）
+      <textarea
+        :value="form.settings.allowedPrivateHosts.join('\n')"
+        rows="3"
+        placeholder="staging.example.local"
+        @input="form.settings.allowedPrivateHosts = ($event.target as HTMLTextAreaElement).value.split(/\r?\n/).map(value => value.trim()).filter(Boolean)"
+      />
+      <span class="hint">SSRF対策により通常は拒否します。検査が必要な社内・ローカル環境だけを明示してください。</span>
+    </label>
+
     <fieldset>
       <legend>認証</legend>
       <label>

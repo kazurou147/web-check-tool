@@ -21,3 +21,9 @@ export function requireProjectId(event: Parameters<typeof getRouterParam>[0]): s
   if (!result.success) throw createError({ statusCode: 400, statusMessage: '案件IDが不正です' })
   return result.data
 }
+
+export function requireRunId(event: Parameters<typeof getRouterParam>[0]): string {
+  const result = projectIdSchema.safeParse(getRouterParam(event, 'runId'))
+  if (!result.success) throw createError({ statusCode: 400, statusMessage: '検査IDが不正です' })
+  return result.data
+}

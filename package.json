@@ -6,12 +6,14 @@
     "dev": "nuxt dev --host 127.0.0.1",
     "build": "nuxt build",
     "typecheck": "nuxt typecheck",
-    "test": "nuxt prepare && vitest run"
+    "test": "nuxt prepare && vitest run",
+    "playwright:install": "playwright install chromium"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
     "nuxt": "^3.20.0",
     "ofetch": "^1.4.1",
+    "playwright": "^1.56.0",
     "vue": "^3.5.22",
     "vue-router": "^4.6.3",
     "zod": "^4.1.12"
