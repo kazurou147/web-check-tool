@@ -1,0 +1,16 @@
+.nuxt/
+.output/
+node_modules/
+.env
+.env.*
+!.env.example
+data/
+output/
+tmp/
+*.log
+.DS_Store
+Thumbs.db
+playwright/.auth/
+test-results/
+coverage/
+.test-data-*/

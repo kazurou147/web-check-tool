@@ -1,0 +1,68 @@
+:root {
+  color-scheme: light;
+  --ink: #17231d;
+  --muted: #65716b;
+  --paper: #f5f4ee;
+  --surface: #fffdf8;
+  --line: #d9ddd7;
+  --green: #155f45;
+  --green-dark: #0f4634;
+  --red: #a63a32;
+  --shadow: 0 12px 32px rgba(23, 35, 29, 0.08);
+  font-family: Inter, "Noto Sans JP", "Yu Gothic UI", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: radial-gradient(circle at top right, #dfece3 0, transparent 32rem), var(--paper); }
+a { color: inherit; }
+button, input, select { font: inherit; }
+h1, h2, p { margin-top: 0; }
+h1 { margin-bottom: .5rem; font-size: clamp(2rem, 4vw, 3.25rem); line-height: 1.05; letter-spacing: -.04em; }
+h2 { margin-bottom: .5rem; }
+
+.app-header { height: 68px; padding: 0 clamp(1rem, 4vw, 3rem); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: rgba(255, 253, 248, .85); backdrop-filter: blur(12px); }
+.brand { font-weight: 800; text-decoration: none; letter-spacing: -.02em; }
+nav { display: flex; gap: 1.25rem; }
+nav a { color: var(--muted); text-decoration: none; font-weight: 700; }
+nav a.router-link-active { color: var(--green); }
+.page-shell { width: min(1040px, calc(100% - 2rem)); margin: 0 auto; padding: clamp(2rem, 6vw, 5rem) 0; }
+.narrow { width: min(760px, 100%); margin: 0 auto; }
+.stack { display: grid; gap: 1.25rem; }
+.stack.compact { gap: .85rem; }
+.stack.spacious { gap: 2rem; }
+.page-heading { display: flex; align-items: end; justify-content: space-between; gap: 1.5rem; }
+.page-heading p { color: var(--muted); max-width: 42rem; }
+.eyebrow { margin-bottom: .45rem; color: var(--green); font-size: .75rem; font-weight: 900; letter-spacing: .14em; }
+.card { border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
+.card-list { display: grid; gap: 1rem; }
+.project-card { padding: 1.4rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.project-card h2 { margin-bottom: .35rem; }
+.meta, .hint { color: var(--muted); font-size: .9rem; }
+.actions, .upload-row { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.button { min-height: 42px; border: 1px solid var(--line); border-radius: 10px; padding: .65rem 1rem; background: white; color: var(--ink); font-weight: 800; text-decoration: none; cursor: pointer; }
+.button.primary { border-color: var(--green); background: var(--green); color: white; }
+.button.primary:hover { background: var(--green-dark); }
+.button.secondary { background: #eef2ee; }
+.button.danger { border-color: #e0b6b2; color: var(--red); background: #fff8f7; }
+.button:disabled { opacity: .5; cursor: not-allowed; }
+.form-card { padding: clamp(1.25rem, 4vw, 2rem); }
+label { display: grid; gap: .45rem; color: #344139; font-size: .9rem; font-weight: 800; }
+input, select { width: 100%; min-height: 44px; border: 1px solid #bcc6bf; border-radius: 9px; padding: .65rem .75rem; background: white; color: var(--ink); }
+input:focus, select:focus { outline: 3px solid rgba(21, 95, 69, .16); border-color: var(--green); }
+fieldset { display: grid; gap: 1rem; border: 1px solid var(--line); border-radius: 12px; padding: 1rem; }
+legend { padding: 0 .4rem; font-weight: 900; }
+.field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.notice { border-radius: 10px; padding: .85rem 1rem; background: #edf3ef; }
+.notice.error { background: #fff0ef; color: #862b24; }
+.notice.success { background: #e8f4ed; color: #155f45; }
+.empty-state { padding: 4rem 2rem; text-align: center; border: 1px dashed #adb8b0; border-radius: 18px; color: var(--muted); }
+.archive-label { display: inline-block; margin: .5rem 0 0; padding: .4rem .65rem; border-radius: 999px; background: #f7e7d7; color: #7f4619 !important; font-weight: 800; }
+.disabled { opacity: .6; pointer-events: none; }
+
+@media (max-width: 680px) {
+  .page-heading, .project-card { align-items: stretch; flex-direction: column; }
+  .field-grid { grid-template-columns: 1fr; }
+  .actions .button { flex: 1; text-align: center; }
+}

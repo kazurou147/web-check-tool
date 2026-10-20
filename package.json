@@ -1,0 +1,24 @@
+{
+  "name": "website-delivery-checker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev --host 127.0.0.1",
+    "build": "nuxt build",
+    "typecheck": "nuxt typecheck",
+    "test": "nuxt prepare && vitest run"
+  },
+  "dependencies": {
+    "nuxt": "^3.20.0",
+    "ofetch": "^1.4.1",
+    "vue": "^3.5.22",
+    "vue-router": "^4.6.3",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.8.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.1.1"
+  }
+}
