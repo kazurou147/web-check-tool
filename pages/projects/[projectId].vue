@@ -10,6 +10,7 @@ const uploading = ref(false)
 const message = ref('')
 const messageKind = ref<'success' | 'error'>('success')
 const excelInput = ref<HTMLInputElement>()
+const previewKey = ref(0)
 
 async function save(payload: ProjectMutationInput) {
   submitting.value = true
@@ -34,6 +35,7 @@ async function uploadExcel() {
   try {
     await $fetch(`/api/projects/${projectId}/excel`, { method: 'POST', body })
     await refresh()
+    previewKey.value += 1
     if (excelInput.value) excelInput.value.value = ''
     setMessage('Excelを案件フォルダへコピー保存しました。原本は変更していません。', 'success')
   } catch (caught) {
@@ -93,7 +95,7 @@ function getErrorMessage(caught: unknown): string {
         <p class="eyebrow">EXCEL</p>
         <h2>入力ファイル</h2>
         <p>登録済み: <strong>{{ data.project.excelFileName || '未登録' }}</strong></p>
-        <p class="hint">.xlsxを案件内の input/current.xlsx へコピーします。内容検証はPhase 2で実装します。</p>
+        <p class="hint">.xlsxを案件内の input/current.xlsx へコピーし、固定2シートと入力内容を検証します。</p>
         <div class="upload-row">
           <input ref="excelInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" :disabled="Boolean(data.project.archivedAt)">
           <button class="button primary" :disabled="uploading || Boolean(data.project.archivedAt)" @click="uploadExcel">
@@ -101,6 +103,12 @@ function getErrorMessage(caught: unknown): string {
           </button>
         </div>
       </div>
+
+      <ExcelInputPreview
+        v-if="data.project.excelFileName"
+        :key="previewKey"
+        :project-id="projectId"
+      />
     </template>
   </section>
 </template>

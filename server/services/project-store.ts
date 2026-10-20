@@ -26,6 +26,10 @@ export class ProjectStore {
     return join(this.projectDir(projectId), 'project.json')
   }
 
+  excelPath(projectId: string): string {
+    return join(this.projectDir(projectId), 'input', 'current.xlsx')
+  }
+
   async create(name: string, settings: ProjectSettings): Promise<Project> {
     const projectId = randomUUID()
     const now = new Date().toISOString()
@@ -100,7 +104,7 @@ export class ProjectStore {
   async saveExcel(projectId: string, fileName: string, bytes: Uint8Array): Promise<Project> {
     const project = await this.get(projectId)
     if (project.archivedAt) throw new ArchivedProjectError('アーカイブ中の案件はExcelを変更できません')
-    const target = join(this.projectDir(projectId), 'input', 'current.xlsx')
+    const target = this.excelPath(projectId)
     await atomicWriteBytes(target, bytes)
     return this.update(projectId, { excelFileName: fileName })
   }
