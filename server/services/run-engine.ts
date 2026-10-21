@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { DuplicateUrlGroup, InputPageRow, InputSnapshot } from '~/shared/types/excel-input'
 import type { Project, ProjectSecrets, ProjectSettings } from '~/shared/types/project'
+import type { AiInputBundle } from '~/shared/types/ai'
 import type {
   Finding,
   ImageResult,
@@ -15,6 +16,14 @@ import { checkGoogleTags } from './checks/google-tags'
 import { checkImages } from './checks/images'
 import { checkLinks, SafeLinkProbe, type LinkProbe } from './checks/links'
 import { checkMetadata } from './checks/metadata'
+import {
+  AI_CONTRACT_VERSION,
+  AI_PROMPT_VERSION,
+  buildAiInputBundle,
+  deriveAiSigningKey,
+  type AiSourceCandidate,
+  type BuildAiInputBundleOptions,
+} from './ai-input'
 import { readExcelInput } from './excel-input'
 import { NetworkPolicy } from './network-policy'
 import {
@@ -38,6 +47,8 @@ export interface RunEngineDependencies {
   inspectorFactory: InspectorFactory
   linkProbeFactory: LinkProbeFactory
   now: () => Date
+  aiInputBuilder?: (options: BuildAiInputBundleOptions) => Promise<AiInputBundle>
+  aiSigningKey?: () => Uint8Array
 }
 
 export class RunEngine {
@@ -69,8 +80,14 @@ export class RunEngine {
       links: [],
       images: [],
       googleTagDetections: [],
+      ai: {
+        mode: project.settings.ai.mode,
+        status: project.settings.ai.mode === 'off' ? 'disabled' : 'preparing',
+        contractVersion: AI_CONTRACT_VERSION,
+        promptVersion: AI_PROMPT_VERSION,
+      },
       aiUsage: {
-        enabled: false,
+        enabled: project.settings.ai.mode !== 'off',
         inputTokens: 0,
         outputTokens: 0,
         estimatedCostUsd: 0,
@@ -95,7 +112,30 @@ export class RunEngine {
       const queue = [...groups.entries()]
       const workerCount = Math.min(project.settings.pageConcurrency, queue.length)
       const probe = inspector.linkProbe ?? this.dependencies.linkProbeFactory(project.settings, result.configSnapshot)
-      await Promise.all(Array.from({ length: workerCount }, () => this.worker(queue, input, result, inspector!, probe)))
+      const aiCandidates: AiSourceCandidate[] = []
+      await Promise.all(Array.from({ length: workerCount }, () => this.worker(queue, input, result, inspector!, probe, aiCandidates)))
+      if (project.settings.ai.mode !== 'off') {
+        await this.transition(result, 'ai_checking')
+        try {
+          result.ai!.inputBundle = await (this.dependencies.aiInputBuilder ?? buildAiInputBundle)({
+            projectId: project.projectId,
+            runId: result.runId,
+            candidates: aiCandidates,
+            probe,
+            signingKey: (this.dependencies.aiSigningKey ?? (() => deriveAiSigningKey(process.env.APP_ENCRYPTION_KEY)))(),
+            now: this.dependencies.now,
+          })
+          result.ai!.status = 'input_ready'
+          await this.event(result, 'ai_input_ready', { itemCount: result.ai!.inputBundle.items.length })
+        } catch {
+          result.ai!.status = 'preparation_failed'
+          result.ai!.error = {
+            code: 'AI_INPUT_PREPARATION_FAILED',
+            message: 'AI判定用入力データを準備できませんでした。機械検査結果は保持されています。',
+          }
+          await this.event(result, 'ai_input_failed', { code: result.ai!.error.code })
+        }
+      }
       result.status = 'completed'
       result.finishedAt = this.dependencies.now().toISOString()
       result.updatedAt = result.finishedAt
@@ -123,6 +163,7 @@ export class RunEngine {
     result: RunResult,
     inspector: WebsiteInspector,
     probe: LinkProbe,
+    aiCandidates: AiSourceCandidate[],
   ): Promise<void> {
     while (true) {
       const next = queue.shift()
@@ -136,6 +177,7 @@ export class RunEngine {
         result.links.push(...pageResultLinks.get(pageResult)!)
         result.images.push(...pageResultImages.get(pageResult)!)
         result.googleTagDetections.push(...pageResultTags.get(pageResult)!)
+        aiCandidates.push(...(pageResultAiCandidates.get(pageResult) ?? []))
       } catch (error) {
         pageResult = buildFailedPageResult(normalizedUrl, rows, startedAt, this.dependencies.now().toISOString(), error)
       } finally {
@@ -150,6 +192,7 @@ export class RunEngine {
       pageResultLinks.delete(pageResult)
       pageResultImages.delete(pageResult)
       pageResultTags.delete(pageResult)
+      pageResultAiCandidates.delete(pageResult)
     }
   }
 
@@ -205,6 +248,16 @@ export class RunEngine {
     pageResultLinks.set(page, links)
     pageResultImages.set(page, images)
     pageResultTags.set(page, tags.detections)
+    pageResultAiCandidates.set(page, inspection.links.map((link, index) => ({
+      linkResultKey: links[index]!.key,
+      pageUrl: normalizedUrl,
+      href: link.href,
+      resolvedUrl: link.resolvedUrl,
+      linkText: link.text,
+      beforeText: link.beforeText ?? '',
+      afterText: link.afterText ?? '',
+      isImageLink: link.isImageLink,
+    })))
     return page
   }
 
@@ -268,6 +321,7 @@ export function createRunConfig(settings: ProjectSettings): SanitizedRunConfig {
     imageScrollWaitMs: 1_000,
     authMode: settings.auth.mode,
     allowedPrivateHosts: [...(settings.allowedPrivateHosts ?? [])],
+    aiMode: settings.ai?.mode ?? 'off',
     viewports: {
       desktop: { width: 1366, height: 768 },
       mobile: { width: 375, height: 667 },
@@ -480,3 +534,4 @@ function redactForResult(value: string): string {
 const pageResultLinks = new WeakMap<PageResult, LinkResult[]>()
 const pageResultImages = new WeakMap<PageResult, ImageResult[]>()
 const pageResultTags = new WeakMap<PageResult, ReturnType<typeof checkGoogleTags>['detections']>()
+const pageResultAiCandidates = new WeakMap<PageResult, AiSourceCandidate[]>()

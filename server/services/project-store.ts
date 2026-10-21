@@ -68,6 +68,7 @@ export class ProjectStore {
           ...defaults,
           ...project.settings,
           allowedPrivateHosts: project.settings.allowedPrivateHosts ?? [],
+          ai: { ...defaults.ai, ...project.settings.ai },
           auth: { ...defaults.auth, ...project.settings.auth },
         },
       }

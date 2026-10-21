@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import ExcelJS from 'exceljs'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProjectStore } from '~/server/services/project-store'
+import type { LinkProbe } from '~/server/services/checks/links'
 import { PageInspectionError, withPageRetries, type PageInspection, type WebsiteInspector } from '~/server/services/playwright-inspector'
 import { buildFailedPageResult, RunEngine } from '~/server/services/run-engine'
 import { RunStore } from '~/server/services/run-store'
@@ -100,12 +101,14 @@ describe('Phase 3実行基盤', () => {
     }
     const runStore = new RunStore(projectStore.projectsDir)
     let time = Date.parse('2026-10-20T00:00:00.000Z')
+    const aiInputBuilder = vi.fn(async () => { throw new Error('OFFでは呼び出してはいけません') })
     const engine = new RunEngine({
       projectStore,
       runStore,
       inspectorFactory: async () => inspector,
       linkProbeFactory: () => ({ probe: async url => ({ requestedUrl: url, finalUrl: url, status: 200, contentType: 'text/html', redirectCount: 0 }) }),
       now: () => new Date(time += 1_000),
+      aiInputBuilder,
     })
 
     const prepared = await engine.prepare(project.projectId)
@@ -123,10 +126,20 @@ describe('Phase 3実行基盤', () => {
     expect(result.pages).toHaveLength(2)
     expect(result.summary.ng).toBe(1)
     expect(result.summary.unchecked).toBe(5)
+    expect(result.ai).toMatchObject({ mode: 'off', status: 'disabled' })
+    expect(aiInputBuilder).not.toHaveBeenCalled()
 
-    const persisted = JSON.parse(await readFile(join(projectStore.projectsDir, project.projectId, 'runs', result.runId, 'result.json'), 'utf8'))
+    const resultPath = join(projectStore.projectsDir, project.projectId, 'runs', result.runId, 'result.json')
+    const persisted = JSON.parse(await readFile(resultPath, 'utf8'))
     expect(persisted.status).toBe('completed')
     expect(persisted.fatalError).toBeUndefined()
+
+    delete persisted.ai
+    delete persisted.configSnapshot.aiMode
+    await writeFile(resultPath, `${JSON.stringify(persisted, null, 2)}\n`)
+    const legacyLoaded = await runStore.get(project.projectId, result.runId)
+    expect(legacyLoaded.configSnapshot.aiMode).toBe('off')
+    expect(legacyLoaded.ai).toMatchObject({ mode: 'off', status: 'disabled' })
 
     const history = await runStore.list(project.projectId)
     expect(history).toHaveLength(1)
@@ -137,6 +150,104 @@ describe('Phase 3実行基盤', () => {
       completedPages: 2,
       summary: { ng: 1, unchecked: 5 },
     })
+  })
+
+  it('AI入力準備に失敗しても機械検査結果を維持して完了する', async () => {
+    const directory = await mkdtemp(join(process.cwd(), '.test-data-phase5a-run-'))
+    temporaryDirectories.push(directory)
+    const projectStore = new ProjectStore(directory)
+    const settings = defaultProjectSettings()
+    settings.ai.mode = 'manual'
+    const project = await projectStore.create('Phase 5-A fixture', settings)
+    const workbook = new ExcelJS.Workbook()
+    const pages = workbook.addWorksheet('納品前のチェック')
+    pages.addRow(['ページ名', 'URL', 'title', 'description'])
+    pages.addRow(['トップ', 'https://example.com/', 'Title', 'Description'])
+    workbook.addWorksheet('Googleタグ').addRow(['タグ名', '設置コード'])
+    await projectStore.saveExcel(project.projectId, 'fixture.xlsx', new Uint8Array(await workbook.xlsx.writeBuffer()))
+
+    const inspector: WebsiteInspector = {
+      authenticate: async () => undefined,
+      close: async () => undefined,
+      inspect: async url => successfulInspection(url),
+    }
+    const runStore = new RunStore(projectStore.projectsDir)
+    const aiInputBuilder = vi.fn(async () => { throw new Error('secret failure detail') })
+    const engine = new RunEngine({
+      projectStore,
+      runStore,
+      inspectorFactory: async () => inspector,
+      linkProbeFactory: () => ({ probe: async url => ({ requestedUrl: url, finalUrl: url, status: 200, contentType: 'text/html', redirectCount: 0 }) }),
+      now: () => new Date('2026-10-21T00:00:00.000Z'),
+      aiInputBuilder,
+      aiSigningKey: () => new Uint8Array(32),
+    })
+
+    const prepared = await engine.prepare(project.projectId)
+    const result = await engine.execute(prepared)
+
+    expect(aiInputBuilder).toHaveBeenCalledOnce()
+    expect(result.status).toBe('completed')
+    expect(result.summary).toMatchObject({ ng: 0, needsReview: 0, unchecked: 0 })
+    expect(result.ai).toMatchObject({
+      mode: 'manual',
+      status: 'preparation_failed',
+      error: { code: 'AI_INPUT_PREPARATION_FAILED' },
+    })
+    expect(JSON.stringify(result)).not.toContain('secret failure detail')
+  })
+
+  it('AI用リンク先取得だけが失敗した場合も機械リンク判定を変更しない', async () => {
+    const directory = await mkdtemp(join(process.cwd(), '.test-data-phase5a-target-'))
+    temporaryDirectories.push(directory)
+    const projectStore = new ProjectStore(directory)
+    const settings = defaultProjectSettings()
+    settings.ai.mode = 'manual'
+    const project = await projectStore.create('Phase 5-A target fixture', settings)
+    const workbook = new ExcelJS.Workbook()
+    const pages = workbook.addWorksheet('納品前のチェック')
+    pages.addRow(['ページ名', 'URL', 'title', 'description'])
+    pages.addRow(['トップ', 'https://example.com/', 'Title', 'Description'])
+    workbook.addWorksheet('Googleタグ').addRow(['タグ名', '設置コード'])
+    await projectStore.saveExcel(project.projectId, 'fixture.xlsx', new Uint8Array(await workbook.xlsx.writeBuffer()))
+
+    const inspector: WebsiteInspector = {
+      authenticate: async () => undefined,
+      close: async () => undefined,
+      inspect: async url => ({
+        ...successfulInspection(url),
+        links: [{
+          href: '/target',
+          resolvedUrl: 'https://example.com/target',
+          text: '移動先',
+          beforeText: '詳しくは',
+          afterText: 'をご覧ください。',
+          isImageLink: false,
+        }],
+      }),
+    }
+    const probe: LinkProbe = {
+      probe: async (url, includeBody) => {
+        if (includeBody) throw new Error('AI target unavailable')
+        return { requestedUrl: url, finalUrl: url, status: 200, contentType: 'text/html', redirectCount: 0 }
+      },
+    }
+    const engine = new RunEngine({
+      projectStore,
+      runStore: new RunStore(projectStore.projectsDir),
+      inspectorFactory: async () => inspector,
+      linkProbeFactory: () => probe,
+      now: () => new Date('2026-10-21T00:00:00.000Z'),
+      aiSigningKey: () => new Uint8Array(32),
+    })
+
+    const result = await engine.execute(await engine.prepare(project.projectId))
+
+    expect(result.status).toBe('completed')
+    expect(result.links[0]).toMatchObject({ verdict: 'ok', status: 200 })
+    expect(result.ai).toMatchObject({ mode: 'manual', status: 'input_ready' })
+    expect(result.ai?.inputBundle?.items[0]?.target.fetchStatus).toBe('fetch_failed')
+    expect(result.summary.ng).toBe(0)
   })
 })
 

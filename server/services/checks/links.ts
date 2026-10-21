@@ -5,6 +5,8 @@ export interface CapturedLink {
   href: string
   resolvedUrl: string
   text: string
+  beforeText?: string
+  afterText?: string
   isImageLink: boolean
 }
 
@@ -87,7 +89,7 @@ export async function checkLinks(
 ): Promise<LinkResult[]> {
   const cache = new Map<string, Promise<HttpProbeResult>>()
   return Promise.all(links.map(async (link, index) => {
-    const key = `${pageUrl}|link|${index}|${link.resolvedUrl || link.href}`
+    const key = `${redactUrl(pageUrl)}|link|${index}|${redactUrl(link.resolvedUrl || link.href)}`
     const base = {
       key,
       pageUrl,

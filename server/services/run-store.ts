@@ -52,7 +52,7 @@ export class RunStore {
       if (value.schemaVersion !== 1 || value.projectId !== projectId || value.runId !== runId) {
         throw new Error('検査結果の形式が不正です')
       }
-      return value
+      return normalizeLegacyRun(value)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RunNotFoundError('検査結果が見つかりません')
       throw error
@@ -95,6 +95,26 @@ export class RunStore {
         summary: result.summary,
         fatalError: result.fatalError,
       }))
+  }
+}
+
+function normalizeLegacyRun(value: RunResult): RunResult {
+  const mode = value.configSnapshot.aiMode ?? 'off'
+  return {
+    ...value,
+    configSnapshot: { ...value.configSnapshot, aiMode: mode },
+    ai: value.ai ?? {
+      mode,
+      status: mode === 'off' ? 'disabled' : 'preparation_failed',
+      contractVersion: '1.0.0',
+      promptVersion: '1.0.0',
+      ...(mode === 'off' ? {} : {
+        error: {
+          code: 'LEGACY_AI_DATA_UNAVAILABLE',
+          message: 'この履歴にはAI判定用入力データが保存されていません。',
+        },
+      }),
+    },
   }
 }
 

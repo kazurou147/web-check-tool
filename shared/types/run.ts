@@ -1,5 +1,6 @@
 import type { InputSnapshot } from './excel-input'
 import type { AuthMode } from './project'
+import type { AiRunData } from './ai'
 
 export type Verdict = 'ng' | 'needs_review' | 'unchecked' | 'excluded' | 'ok'
 export type RunStatus =
@@ -127,6 +128,7 @@ export interface SanitizedRunConfig {
   imageScrollWaitMs: number
   authMode: AuthMode
   allowedPrivateHosts: string[]
+  aiMode: 'off' | 'manual' | 'api'
   viewports: {
     desktop: { width: 1366; height: 768 }
     mobile: { width: 375; height: 667 }
@@ -150,8 +152,9 @@ export interface RunResult {
   links: LinkResult[]
   images: ImageResult[]
   googleTagDetections: GoogleTagDetection[]
+  ai?: AiRunData
   aiUsage: {
-    enabled: false
+    enabled: boolean
     inputTokens: 0
     outputTokens: 0
     estimatedCostUsd: 0

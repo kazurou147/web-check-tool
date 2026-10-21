@@ -193,7 +193,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       const rawHtml = rawBody.toString('utf8')
       const renderedHtml = (await page.content()).slice(0, this.config.maxResponseBytes)
       const metadata = await captureMetadata(page)
-      const links = await captureLinks(page)
+      const links = await captureLinks(page, (this.settings.ai?.mode ?? 'off') !== 'off')
       const anchorTargets = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[id], a[name]')]
         .flatMap(element => [element.id, element.getAttribute('name') ?? ''])
         .filter(Boolean))
@@ -410,13 +410,36 @@ async function captureMetadata(page: Page): Promise<RenderedMetadata> {
   }))
 }
 
-async function captureLinks(page: Page): Promise<CapturedLink[]> {
-  return page.evaluate(() => [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].map(anchor => ({
-    href: anchor.getAttribute('href') ?? '',
-    resolvedUrl: anchor.href,
-    text: anchor.textContent ?? '',
-    isImageLink: Boolean(anchor.querySelector('img, picture')),
-  })))
+async function captureLinks(page: Page, includeAiContext: boolean): Promise<CapturedLink[]> {
+  return page.evaluate((includeAiContext) => {
+    const body = document.body
+    const limit = (value: string, side: 'start' | 'end') => {
+      const characters = Array.from(value)
+      return (side === 'start' ? characters.slice(0, 200) : characters.slice(-200)).join('')
+    }
+    return [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].map(anchor => {
+      let beforeText = ''
+      let afterText = ''
+      if (includeAiContext && body && body.contains(anchor)) {
+        const before = document.createRange()
+        before.selectNodeContents(body)
+        before.setEndBefore(anchor)
+        beforeText = limit(before.toString(), 'end')
+        const after = document.createRange()
+        after.selectNodeContents(body)
+        after.setStartAfter(anchor)
+        afterText = limit(after.toString(), 'start')
+      }
+      return {
+        href: anchor.getAttribute('href') ?? '',
+        resolvedUrl: anchor.href,
+        text: anchor.textContent ?? '',
+        beforeText,
+        afterText,
+        isImageLink: Boolean(anchor.querySelector('img, picture, svg')),
+      }
+    })
+  }, includeAiContext)
 }
 
 async function captureImages(page: Page): Promise<CapturedImage[]> {

@@ -7,6 +7,13 @@ describe('案件入力検証', () => {
     expect(projectMutationSchema.safeParse({ name: '案件A', settings: defaultProjectSettings() }).success).toBe(true)
   })
 
+  it('AI設定がない旧形式をoffとして受理する', () => {
+    const settings = defaultProjectSettings() as Partial<ReturnType<typeof defaultProjectSettings>>
+    delete settings.ai
+    const parsed = projectMutationSchema.parse({ name: '旧案件', settings })
+    expect(parsed.settings.ai).toEqual({ mode: 'off' })
+  })
+
   it('空の案件名と範囲外の並列数を拒否する', () => {
     const settings = { ...defaultProjectSettings(), pageConcurrency: 4 }
     expect(projectMutationSchema.safeParse({ name: ' ', settings }).success).toBe(false)

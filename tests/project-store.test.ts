@@ -31,6 +31,17 @@ describe('ProjectStore', () => {
     expect(await store.list(true)).toHaveLength(0)
   })
 
+  it('AI設定がない旧案件をoffとして読み込む', async () => {
+    const project = await store.create('旧案件', defaultProjectSettings())
+    const path = join(dataDir, 'projects', project.projectId, 'project.json')
+    const legacy = JSON.parse(await readFile(path, 'utf8'))
+    delete legacy.settings.ai
+    await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`)
+
+    const loaded = await store.get(project.projectId)
+    expect(loaded.settings.ai).toEqual({ mode: 'off' })
+  })
+
   it('Excelをcurrent.xlsxへコピーし、渡された原本バイト列を変更しない', async () => {
     const project = await store.create('LP', defaultProjectSettings())
     const source = Buffer.from('PK\u0003\u0004fixture-xlsx')
