@@ -345,12 +345,21 @@ function aggregateImageFinding(
   inspection: PageInspection,
 ): Finding {
   const viewportErrors = inspection.images.filter(viewport => viewport.error)
-  const verdict = viewportErrors.length > 0 ? 'ng' : highestVerdict(images.map(image => image.verdict))
+  const inspectedVerdicts = images.map(image => image.verdict).filter(verdict => verdict !== 'excluded')
+  const verdict = viewportErrors.length > 0
+    ? 'ng'
+    : inspectedVerdicts.length > 0
+      ? highestVerdict(inspectedVerdicts)
+      : images.length > 0 ? 'excluded' : 'ok'
   return {
     key: `${url}|images`,
     item: 'images',
     verdict,
-    detailStatus: viewportErrors.length > 0 ? 'viewport_failed' : images.length === 0 ? 'no_images' : verdict === 'ok' ? 'checked' : 'issues_found',
+    detailStatus: viewportErrors.length > 0
+      ? 'viewport_failed'
+      : images.length === 0
+        ? 'no_images'
+        : verdict === 'ok' ? 'checked' : verdict === 'excluded' ? 'excluded' : 'issues_found',
     url,
     pageNames,
     sourceRows,
@@ -426,19 +435,21 @@ function summarize(result: RunResult): RunResult['summary'] {
   for (const finding of result.pages.flatMap(page => page.findings)) {
     if (finding.detailStatus === 'not_applicable') continue
     if (finding.verdict === 'needs_review') summary.needsReview += 1
+    else if (finding.verdict === 'excluded') summary.excluded = (summary.excluded ?? 0) + 1
     else summary[finding.verdict] += 1
   }
   return summary
 }
 
 function emptySummary(): RunResult['summary'] {
-  return { ng: 0, needsReview: 0, unchecked: 0, ok: 0 }
+  return { ng: 0, needsReview: 0, unchecked: 0, excluded: 0, ok: 0 }
 }
 
 function highestVerdict(verdicts: Verdict[]): Verdict {
   if (verdicts.includes('ng')) return 'ng'
   if (verdicts.includes('needs_review')) return 'needs_review'
   if (verdicts.includes('unchecked')) return 'unchecked'
+  if (verdicts.includes('excluded')) return 'excluded'
   return 'ok'
 }
 
@@ -447,6 +458,7 @@ function verdictCounts(verdicts: Verdict[]): Record<string, number> {
     ng: verdicts.filter(value => value === 'ng').length,
     needsReview: verdicts.filter(value => value === 'needs_review').length,
     unchecked: verdicts.filter(value => value === 'unchecked').length,
+    excluded: verdicts.filter(value => value === 'excluded').length,
     ok: verdicts.filter(value => value === 'ok').length,
   }
 }

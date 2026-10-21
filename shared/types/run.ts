@@ -1,7 +1,7 @@
 import type { InputSnapshot } from './excel-input'
 import type { AuthMode } from './project'
 
-export type Verdict = 'ng' | 'needs_review' | 'unchecked' | 'ok'
+export type Verdict = 'ng' | 'needs_review' | 'unchecked' | 'excluded' | 'ok'
 export type RunStatus =
   | 'queued'
   | 'reading_input'
@@ -56,8 +56,8 @@ export interface PageResult {
   error?: SafeError
 }
 
-export type GoogleTagDetectionMethod = 'html_direct' | 'gtm_delivered' | 'network'
-export type GoogleTagInstallationMethod = 'direct' | 'gtm' | 'unknown'
+export type GoogleTagDetectionMethod = 'html_direct' | 'gtm_delivered' | 'google_tag_delivered' | 'network'
+export type GoogleTagInstallationMethod = 'direct' | 'gtm' | 'google_tag' | 'unknown'
 export type GoogleTagType = 'gtm' | 'ga4' | 'google_ads' | 'google_tag' | 'floodlight'
 
 export interface GoogleTagDetection {
@@ -71,6 +71,8 @@ export interface GoogleTagDetection {
   verdict: Verdict
   verdictReason: string
   relatedDetectionKeys: string[]
+  sourceTagId?: string
+  associationEvidence?: string[]
   location?: 'head' | 'body' | 'unknown'
   occurrences: number
 }
@@ -106,6 +108,12 @@ export interface ImageResult {
   verdict: Verdict
   message: string
   evidence: string[]
+  exclusion?: {
+    reason: string
+    hiddenBy: string
+    cssSelector: string
+    mediaCondition: string
+  }
 }
 
 export interface SanitizedRunConfig {
@@ -137,7 +145,7 @@ export interface RunResult {
   updatedAt: string
   configSnapshot: SanitizedRunConfig
   input: InputSnapshot
-  summary: { ng: number; needsReview: number; unchecked: number; ok: number }
+  summary: { ng: number; needsReview: number; unchecked: number; excluded?: number; ok: number }
   pages: PageResult[]
   links: LinkResult[]
   images: ImageResult[]

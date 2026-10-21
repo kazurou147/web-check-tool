@@ -442,6 +442,141 @@ async function captureImages(page: Page): Promise<CapturedImage[]> {
       seen.add(key)
       output.push(item)
     }
+    type ResponsiveHideRule = {
+      selector: string
+      property: 'display' | 'visibility' | 'content-visibility'
+      value: string
+      mediaCondition: string
+      stylesheet: string
+    }
+    const responsiveHideRules: ResponsiveHideRule[] = []
+    const responsiveFeature = /(?:^|[(:])\s*(?:min-|max-)?(?:width|height|inline-size|block-size|aspect-ratio|resolution|orientation|pointer|hover)\b/i
+    const collectHideRules = (rules: CSSRuleList, mediaConditions: string[], stylesheet: string): void => {
+      for (const rule of [...rules]) {
+        if (rule.type === CSSRule.MEDIA_RULE) {
+          const mediaRule = rule as CSSMediaRule
+          if (window.matchMedia(mediaRule.conditionText).matches) {
+            collectHideRules(mediaRule.cssRules, [...mediaConditions, mediaRule.conditionText], stylesheet)
+          }
+          continue
+        }
+        if (rule.type === CSSRule.STYLE_RULE && mediaConditions.some(condition => responsiveFeature.test(condition))) {
+          const styleRule = rule as CSSStyleRule
+          const hiddenDeclaration = ([
+            ['display', styleRule.style.display],
+            ['visibility', styleRule.style.visibility],
+            ['content-visibility', styleRule.style.getPropertyValue('content-visibility')],
+          ] as const).find(([property, value]) => (
+            (property === 'display' && value === 'none')
+            || (property === 'visibility' && /^(?:hidden|collapse)$/.test(value))
+            || (property === 'content-visibility' && value === 'hidden')
+          ))
+          if (hiddenDeclaration) {
+            responsiveHideRules.push({
+              selector: styleRule.selectorText,
+              property: hiddenDeclaration[0],
+              value: hiddenDeclaration[1],
+              mediaCondition: mediaConditions.join(' and '),
+              stylesheet,
+            })
+          }
+          continue
+        }
+        const groupedRule = rule as CSSGroupingRule
+        if ('cssRules' in groupedRule) collectHideRules(groupedRule.cssRules, mediaConditions, stylesheet)
+      }
+    }
+    for (const stylesheet of [...document.styleSheets]) {
+      try {
+        collectHideRules(stylesheet.cssRules, [], stylesheet.href ?? 'inline stylesheet')
+      } catch {
+        // Cross-origin stylesheets are unreadable. Without inspectable evidence the image stays needs_review.
+      }
+    }
+    const elementName = (element: Element): string => {
+      let name = element.tagName.toLowerCase()
+      if (element.id) name += `#${element.id}`
+      if (element.classList.length) name += `.${[...element.classList].slice(0, 3).join('.')}`
+      return name
+    }
+    const interactivePattern = /(?:^|[-_])(?:accordion|collapse|dialog|drawer|lightbox|menu|modal|offcanvas|popover|popup|slider|carousel|tab)(?:$|[-_])/i
+    const visibilityObservation = (image: HTMLImageElement): NonNullable<Item['visibility']> => {
+      const rectangle = image.getBoundingClientRect()
+      const nodes: Element[] = []
+      let current: Element | null = image
+      while (current) {
+        nodes.push(current)
+        current = current.parentElement
+      }
+      let hiddenAncestor: Element | undefined
+      let hiddenProperty: NonNullable<Item['visibility']>['hiddenProperty']
+      let hiddenValue: string | undefined
+      let responsiveRule: ResponsiveHideRule | undefined
+      for (const node of nodes) {
+        const style = getComputedStyle(node)
+        const hidden: Array<[NonNullable<typeof hiddenProperty>, string]> = [
+          ['display', style.display],
+          ['visibility', style.visibility],
+          ['content-visibility', style.contentVisibility],
+        ]
+        const matchedHidden = hidden.find(([property, value]) => (
+          (property === 'display' && value === 'none')
+          || (property === 'visibility' && /^(?:hidden|collapse)$/.test(value))
+          || (property === 'content-visibility' && value === 'hidden')
+        ))
+        if (!matchedHidden) continue
+        const matchedRule = responsiveHideRules.find(rule => {
+          if (rule.property !== matchedHidden[0] || rule.value !== matchedHidden[1]) return false
+          try { return node.matches(rule.selector) } catch { return false }
+        })
+        if (!matchedRule) continue
+        hiddenAncestor = node
+        hiddenProperty = matchedHidden[0]
+        hiddenValue = matchedHidden[1]
+        responsiveRule = matchedRule
+        break
+      }
+
+      const relevantNodes = hiddenAncestor ? nodes.slice(0, nodes.indexOf(hiddenAncestor) + 1) : nodes
+      const interactiveEvidence: string[] = []
+      for (const node of relevantNodes) {
+        if (node.matches('dialog, details:not([open]), [popover], [role="dialog"], [role="menu"], [aria-expanded], [aria-haspopup], [inert], [hidden]')) {
+          interactiveEvidence.push(`操作で表示される可能性がある要素: ${elementName(node)}`)
+        }
+        const tokens = `${node.id} ${[...node.classList].join(' ')}`.split(/\s+/)
+        if (tokens.some(token => interactivePattern.test(token))) {
+          interactiveEvidence.push(`操作UIを示す識別子: ${elementName(node)}`)
+        }
+      }
+      if (hiddenAncestor?.id) {
+        const controlled = [...document.querySelectorAll<HTMLElement>('[aria-controls], a[href^="#"]')].find(control => (
+          control.getAttribute('aria-controls')?.split(/\s+/).includes(hiddenAncestor!.id)
+          || control.getAttribute('href') === `#${hiddenAncestor!.id}`
+        ))
+        if (controlled) interactiveEvidence.push(`非表示要素を操作するコントロール: ${elementName(controlled)}`)
+      }
+      if (responsiveRule && /:(?:checked|focus|focus-within|hover|target|has)\b/.test(responsiveRule.selector)) {
+        interactiveEvidence.push(`状態依存セレクター: ${responsiveRule.selector}`)
+      }
+
+      return {
+        clientRectCount: image.getClientRects().length,
+        layoutWidth: rectangle.width,
+        layoutHeight: rectangle.height,
+        ...(hiddenAncestor ? { hiddenAncestor: elementName(hiddenAncestor) } : {}),
+        ...(hiddenProperty ? { hiddenProperty } : {}),
+        ...(hiddenValue ? { hiddenValue } : {}),
+        ...(responsiveRule ? {
+          responsiveRule: {
+            selector: responsiveRule.selector,
+            mediaCondition: responsiveRule.mediaCondition,
+            stylesheet: responsiveRule.stylesheet,
+          },
+        } : {}),
+        interactiveRisk: interactiveEvidence.length > 0,
+        interactiveEvidence,
+      }
+    }
     for (const image of document.querySelectorAll<HTMLImageElement>('img')) {
       const sourceKind = image.closest('picture')
         ? 'picture'
@@ -450,9 +585,12 @@ async function captureImages(page: Page): Promise<CapturedImage[]> {
         imageUrl: image.currentSrc || image.src,
         sourceKind,
         location: location(image),
+        currentSrc: image.currentSrc,
         complete: image.complete,
         naturalWidth: image.naturalWidth,
+        naturalHeight: image.naturalHeight,
         decoded: image.complete ? image.naturalWidth > 0 : null,
+        visibility: visibilityObservation(image),
       })
     }
     const cssUrls = (value: string): string[] => [...value.matchAll(/url\(["']?([^"')]+)["']?\)/gi)].map(match => match[1]!)

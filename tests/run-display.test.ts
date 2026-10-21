@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import type { Finding, RunResult, Verdict } from '~/shared/types/run'
-import { compareText, highestFindingVerdict, isActiveRun, runProgress, sortFindings, visibleText } from '~/shared/utils/run-display'
+import { describe, expect, it, vi } from 'vitest'
+import type { Finding, ImageResult, RunResult, Verdict } from '~/shared/types/run'
+import { compareText, copyGoogleNetworkUrl, highestFindingVerdict, imageVerdictCounts, isActiveRun, runProgress, sortFindings, summarizeGoogleEvidence, visibleText } from '~/shared/utils/run-display'
 
 describe('Phase 4 検査結果表示', () => {
   it('実行中状態だけをポーリング対象として扱う', () => {
@@ -19,14 +19,60 @@ describe('Phase 4 検査結果表示', () => {
     expect(runProgress(result)).toEqual({ completed: 2, total: 3, percent: 67 })
   })
 
-  it('判定をNG・要確認・未確認・OKの順に表示する', () => {
-    const findings = (['ok', 'unchecked', 'ng', 'needs_review'] as Verdict[]).map((verdict, index) => ({
+  it('判定をNG・要確認・未確認・対象外・OKの順に表示する', () => {
+    const findings = (['ok', 'excluded', 'unchecked', 'ng', 'needs_review'] as Verdict[]).map((verdict, index) => ({
       key: String(index),
       verdict,
     })) as Finding[]
 
     expect(highestFindingVerdict(findings)).toBe('ng')
-    expect(sortFindings(findings).map(item => item.verdict)).toEqual(['ng', 'needs_review', 'unchecked', 'ok'])
+    expect(sortFindings(findings).map(item => item.verdict)).toEqual(['ng', 'needs_review', 'unchecked', 'excluded', 'ok'])
+  })
+
+  it('対象外を独立集計し、exclusionを持たない既存画像結果も表示できる', () => {
+    const images = [
+      { verdict: 'ok' },
+      { verdict: 'ok' },
+      { verdict: 'ng' },
+      { verdict: 'needs_review' },
+      { verdict: 'unchecked' },
+      { verdict: 'excluded', exclusion: { reason: 'responsive', hiddenBy: 'aside', cssSelector: '.sidebar', mediaCondition: '(max-width: 600px)' } },
+    ] as ImageResult[]
+
+    expect(imageVerdictCounts(images)).toEqual({ ng: 1, needsReview: 1, unchecked: 1, excluded: 1, ok: 2 })
+    expect(imageVerdictCounts(images.slice(0, 5))).toEqual({ ng: 1, needsReview: 1, unchecked: 1, excluded: 0, ok: 2 })
+  })
+
+  it('保存済みJSON形式の長いGoogle通信URLをイベント単位で要約し識別値を通常表示へ出さない', () => {
+    const first = 'https://www.google-analytics.com/g/collect?tid=G-TEST123&en=page_view&cid=client-secret&sid=session-secret&dl=https%3A%2F%2Fexample.com%2F'
+    const second = 'https://www.google.com/g/collect?tid=G-TEST123&en=page_view&cid=other-client&sid=other-session'
+    const summary = summarizeGoogleEvidence([
+      'head内のloaderコード',
+      `Google関連通信: ${first}`,
+      `Google関連通信: ${second}`,
+      `Google関連通信: ${second}`,
+    ], 'G-TEST123')
+
+    expect(summary.notes).toEqual(['head内のloaderコード'])
+    expect(summary.networkGroups).toHaveLength(1)
+    expect(summary.networkGroups[0]).toMatchObject({
+      hosts: ['www.google-analytics.com', 'www.google.com'],
+      path: '/g/collect',
+      detectedId: 'G-TEST123',
+      eventName: 'page_view',
+      occurrences: 3,
+      urls: [first, second],
+    })
+    expect(JSON.stringify({ ...summary.networkGroups[0], urls: undefined })).not.toContain('client-secret')
+  })
+
+  it('通信URLのコピーでは省略前の完全URLを渡す', async () => {
+    const longUrl = `https://www.google-analytics.com/g/collect?tid=G-TEST123&en=scroll&payload=${'x'.repeat(3_000)}`
+    const writer = vi.fn(async () => undefined)
+
+    await copyGoogleNetworkUrl(longUrl, writer)
+
+    expect(writer).toHaveBeenCalledWith(longUrl)
   })
 
   it('省略記号とピリオド3文字をコードポイント込みで区別する', () => {

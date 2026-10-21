@@ -38,7 +38,8 @@ interface HtmlInstallation {
 export function checkGoogleTags(input: GoogleTagCheckInput): GoogleTagCheckResult {
   const htmlInstallations = findHtmlInstallations(input.rawHtml)
   const direct = buildDirectDetections(input.pageUrl, htmlInstallations)
-  const network = buildNetworkDetections(input.pageUrl, input.network)
+  const directGoogleTagIds = new Set(direct.filter(item => item.id.startsWith('GT-')).map(item => item.id))
+  const network = buildNetworkDetections(input.pageUrl, input.network, directGoogleTagIds)
   const renderedIds = extractIds(input.renderedHtml)
   const detections = mergeDetections([...direct, ...network])
   const directIds = new Set(direct.map(detection => detection.id))
@@ -83,6 +84,8 @@ export function checkGoogleTags(input: GoogleTagCheckInput): GoogleTagCheckResul
       detection.verdict = 'ok'
       detection.verdictReason = detection.detectionMethod === 'gtm_delivered'
         ? 'GTM経由の配信として検出しました。期待未登録だけではNGにしません。'
+        : detection.detectionMethod === 'google_tag_delivered'
+          ? `HTMLへ直接設置されたGoogleタグ ${detection.sourceTagId} 経由の配信として検出しました。期待タグの設置判定とは別に評価しています。`
         : '期待タグまたは許容される配信方法として検出しました。'
     }
   }
@@ -123,7 +126,7 @@ export function checkGoogleTags(input: GoogleTagCheckInput): GoogleTagCheckResul
       pageNames: input.pageNames,
       sourceRows: input.sourceRows,
       expected: [...expectedById.keys()],
-      actual: detections.map(({ id, detectionMethod, installationMethod }) => ({ id, detectionMethod, installationMethod })),
+      actual: detections.map(({ id, detectionMethod, installationMethod, sourceTagId }) => ({ id, detectionMethod, installationMethod, sourceTagId })),
       message: noTarget
         ? 'Googleタグは検査対象外です。'
         : reasons.length > 0 ? reasons.map(reason => reason.text).join(' ') : 'Googleタグは仕様どおりです。',
@@ -175,25 +178,70 @@ function buildDirectDetections(pageUrl: string, installations: HtmlInstallation[
   })
 }
 
-function buildNetworkDetections(pageUrl: string, observations: TagNetworkObservation[]): GoogleTagDetection[] {
-  const records = new Map<string, { method: GoogleTagDetectionMethod; installation: GoogleTagInstallationMethod; evidence: string[] }>()
+function buildNetworkDetections(
+  pageUrl: string,
+  observations: TagNetworkObservation[],
+  directGoogleTagIds: Set<string>,
+): GoogleTagDetection[] {
+  const records = new Map<string, {
+    method: GoogleTagDetectionMethod
+    installation: GoogleTagInstallationMethod
+    evidence: string[]
+    sourceTagId?: string
+    associationEvidence: string[]
+  }>()
   for (const observation of observations) {
     for (const id of extractNetworkIds(observation.url)) {
-      const deliveredByGtm = observation.initiatorUrls.some(url => /googletagmanager\.com\/gtm\.js/i.test(url))
-      const key = `${id}|${deliveredByGtm ? 'gtm_delivered' : 'network'}`
+      const gtmInitiator = observation.initiatorUrls.find(url => /googletagmanager\.com\/gtm\.js(?:[?#]|$)/i.test(url))
+      const sourceGoogleTagId = observation.initiatorUrls
+        .map(extractGoogleTagLoaderId)
+        .find(candidate => candidate !== null && directGoogleTagIds.has(candidate))
+      const method: GoogleTagDetectionMethod = gtmInitiator
+        ? 'gtm_delivered'
+        : sourceGoogleTagId ? 'google_tag_delivered' : 'network'
+      const installation: GoogleTagInstallationMethod = gtmInitiator
+        ? 'gtm'
+        : sourceGoogleTagId ? 'google_tag' : 'unknown'
+      const key = `${id}|${method}|${sourceGoogleTagId ?? ''}`
       const current = records.get(key) ?? {
-        method: deliveredByGtm ? 'gtm_delivered' : 'network',
-        installation: deliveredByGtm ? 'gtm' : 'unknown',
+        method,
+        installation,
         evidence: [],
+        sourceTagId: sourceGoogleTagId ?? undefined,
+        associationEvidence: [],
       }
       current.evidence.push(`Google関連通信: ${safeEvidenceUrl(observation.url)}`)
+      if (gtmInitiator) {
+        current.associationEvidence.push(`通信initiatorでGTMコンテナローダーを確認: ${safeEvidenceUrl(gtmInitiator)}`)
+      } else if (sourceGoogleTagId) {
+        const loaderUrl = observation.initiatorUrls.find(url => extractGoogleTagLoaderId(url) === sourceGoogleTagId)
+        if (loaderUrl) {
+          current.associationEvidence.push(`通信initiatorでHTML直接設置済みGoogleタグ ${sourceGoogleTagId} のローダーを確認: ${safeEvidenceUrl(loaderUrl)}`)
+        }
+      }
       records.set(key, current)
     }
   }
   return [...records.entries()].map(([key, value]) => {
     const id = key.split('|')[0]!
-    return createDetection(pageUrl, id, value.method, value.installation, value.evidence, value.evidence.length)
+    const detection = createDetection(pageUrl, id, value.method, value.installation, value.evidence, value.evidence.length)
+    // 通信回数を正確に集約できるよう、同一URLの反復もJSONへ保持する。
+    detection.evidence = value.evidence
+    detection.sourceTagId = value.sourceTagId
+    detection.associationEvidence = [...new Set(value.associationEvidence)]
+    return detection
   })
+}
+
+function extractGoogleTagLoaderId(value: string): string | null {
+  try {
+    const url = new URL(value)
+    if (!/^(?:www\.)?googletagmanager\.com$/i.test(url.hostname) || !/^\/gtag\/js$/i.test(url.pathname)) return null
+    const id = url.searchParams.get('id')?.toUpperCase() ?? ''
+    return /^GT-[A-Z0-9]+$/.test(id) ? id : null
+  } catch {
+    return null
+  }
 }
 
 function extractNetworkIds(value: string): string[] {
@@ -261,7 +309,11 @@ function createDetection(
 function linkRelatedDetections(detections: GoogleTagDetection[]): void {
   for (const detection of detections) {
     detection.relatedDetectionKeys = detections
-      .filter(candidate => candidate.id === detection.id && candidate.key !== detection.key)
+      .filter(candidate => candidate.key !== detection.key && (
+        candidate.id === detection.id
+        || candidate.sourceTagId === detection.id
+        || detection.sourceTagId === candidate.id
+      ))
       .map(candidate => candidate.key)
   }
 }
@@ -322,7 +374,7 @@ function safeEvidenceUrl(value: string): string {
     }
     url.username = ''
     url.password = ''
-    return url.href.slice(0, 2_048)
+    return url.href
   } catch {
     return '[URLを記録できません]'
   }

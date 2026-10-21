@@ -10,7 +10,7 @@ import type {
   RunSummary,
   Verdict,
 } from '~/shared/types/run'
-import { highestFindingVerdict, isActiveRun, runProgress, sortFindings } from '~/shared/utils/run-display'
+import { highestFindingVerdict, imageVerdictCounts, isActiveRun, runProgress, sortFindings } from '~/shared/utils/run-display'
 
 const props = defineProps<{
   projectId: string
@@ -124,6 +124,10 @@ function imagesFor(page: PageResult): ImageResult[] {
   return result.value?.images.filter(item => item.pageUrl === page.normalizedUrl) ?? []
 }
 
+function imageCountsFor(page: PageResult) {
+  return imageVerdictCounts(imagesFor(page))
+}
+
 function tagsFor(page: PageResult): GoogleTagDetection[] {
   return result.value?.googleTagDetections.filter(item => item.pageUrl === page.normalizedUrl) ?? []
 }
@@ -184,6 +188,7 @@ const verdictLabels: Record<Verdict, string> = {
   ng: 'NG',
   needs_review: '要確認',
   unchecked: '未確認',
+  excluded: '対象外',
   ok: 'OK',
 }
 
@@ -198,8 +203,16 @@ const itemLabels: Record<FindingItem, string> = {
 
 const detectionMethodLabels: Record<GoogleTagDetection['detectionMethod'], string> = {
   html_direct: 'HTML直接設置',
-  gtm_delivered: 'GTM経由',
+  gtm_delivered: 'GTMコンテナ経由',
+  google_tag_delivered: '直接設置Googleタグ経由',
   network: '通信による検出',
+}
+
+const installationMethodLabels: Record<GoogleTagDetection['installationMethod'], string> = {
+  direct: '直接設置',
+  gtm: 'GTMコンテナ',
+  google_tag: '直接設置Googleタグ',
+  unknown: '不明',
 }
 </script>
 
@@ -239,7 +252,7 @@ const detectionMethodLabels: Record<GoogleTagDetection['detectionMethod'], strin
             <span class="status-chip" :class="run.status">{{ statusLabels[run.status] }}</span>
             {{ run.completedPages }}/{{ run.totalPages }}ページ
           </span>
-          <span class="history-counts">NG {{ run.summary.ng }} ・ 要確認 {{ run.summary.needsReview }}</span>
+          <span class="history-counts">NG {{ run.summary.ng }} ・ 要確認 {{ run.summary.needsReview }} ・ 対象外 {{ run.summary.excluded ?? 0 }}</span>
         </button>
       </aside>
 
@@ -271,6 +284,7 @@ const detectionMethodLabels: Record<GoogleTagDetection['detectionMethod'], strin
             <div class="ng"><strong>{{ result.summary.ng }}</strong><span>NG</span></div>
             <div class="needs_review"><strong>{{ result.summary.needsReview }}</strong><span>要確認</span></div>
             <div class="unchecked"><strong>{{ result.summary.unchecked }}</strong><span>未確認</span></div>
+            <div class="excluded"><strong>{{ result.summary.excluded ?? 0 }}</strong><span>対象外</span></div>
             <div class="ok"><strong>{{ result.summary.ok }}</strong><span>OK</span></div>
           </div>
 
@@ -289,7 +303,7 @@ const detectionMethodLabels: Record<GoogleTagDetection['detectionMethod'], strin
           <div class="page-results">
             <div class="section-title-row">
               <h3>ページ別結果</h3>
-              <span>NG・要確認・未確認・OKの順に項目を表示</span>
+              <span>NG・要確認・未確認・対象外・OKの順に項目を表示</span>
             </div>
             <p v-if="!result.pages.length" class="empty-inline">ページの完了を待っています。画面を更新しても途中結果は保持されます。</p>
 
@@ -327,7 +341,8 @@ const detectionMethodLabels: Record<GoogleTagDetection['detectionMethod'], strin
                       <div><span>期待値</span><pre>{{ formatValue(finding.expected) }}</pre></div>
                       <div><span>実際の値</span><pre>{{ formatValue(finding.actual) }}</pre></div>
                     </div>
-                    <ul v-if="finding.evidence.length" class="evidence-list">
+                    <p v-if="finding.item === 'google_tags' && finding.evidence.length" class="evidence-hint">通信根拠は下のGoogleタグ検出詳細に要約表示します。</p>
+                    <ul v-else-if="finding.evidence.length" class="evidence-list">
                       <li v-for="(evidence, index) in finding.evidence" :key="index">{{ evidence }}</li>
                     </ul>
                   </article>
@@ -340,9 +355,13 @@ const detectionMethodLabels: Record<GoogleTagDetection['detectionMethod'], strin
                       <span class="verdict-badge" :class="tag.verdict">{{ verdictLabels[tag.verdict] }}</span>
                       <div>
                         <strong>{{ tag.id }}</strong>
-                        <p>{{ detectionMethodLabels[tag.detectionMethod] }} ／ 設置方法: {{ tag.installationMethod }} ／ 位置: {{ tag.location ?? '不明' }} ／ {{ tag.occurrences }}回</p>
+                        <p>{{ detectionMethodLabels[tag.detectionMethod] }} ／ 設置方法: {{ installationMethodLabels[tag.installationMethod] }} ／ 位置: {{ tag.location ?? '不明' }} ／ {{ tag.occurrences }}回</p>
+                        <p v-if="tag.sourceTagId"><strong>検出元Googleタグ:</strong> {{ tag.sourceTagId }}</p>
                         <p>{{ tag.verdictReason }}</p>
-                        <ul class="evidence-list"><li v-for="(evidence, index) in tag.evidence" :key="index">{{ evidence }}</li></ul>
+                        <ul v-if="tag.associationEvidence?.length" class="association-evidence">
+                          <li v-for="(evidence, index) in tag.associationEvidence" :key="index">{{ evidence }}</li>
+                        </ul>
+                        <GoogleTagEvidence :tag="tag" />
                       </div>
                     </article>
                   </div>
@@ -365,6 +384,13 @@ const detectionMethodLabels: Record<GoogleTagDetection['detectionMethod'], strin
 
                 <details v-if="imagesFor(page).length" class="detail-group">
                   <summary>画像検査詳細（{{ imagesFor(page).length }}件）</summary>
+                  <div class="image-counts" aria-label="画像判定集計">
+                    <span>OK {{ imageCountsFor(page).ok }}</span>
+                    <span>NG {{ imageCountsFor(page).ng }}</span>
+                    <span>要確認 {{ imageCountsFor(page).needsReview }}</span>
+                    <span>未確認 {{ imageCountsFor(page).unchecked }}</span>
+                    <span>対象外 {{ imageCountsFor(page).excluded }}</span>
+                  </div>
                   <div class="detail-list">
                     <article v-for="image in imagesFor(page)" :key="image.key" class="detail-row">
                       <span class="verdict-badge" :class="image.verdict">{{ verdictLabels[image.verdict] }}</span>
@@ -372,6 +398,7 @@ const detectionMethodLabels: Record<GoogleTagDetection['detectionMethod'], strin
                         <strong>{{ image.device === 'desktop' ? 'PC' : 'スマートフォン' }} ／ {{ image.sourceKind }}</strong>
                         <p class="long-value">{{ image.imageUrl }}</p>
                         <p>{{ image.message }} ／ 出現箇所: {{ image.location }}</p>
+                        <p v-if="image.exclusion"><strong>非表示要素:</strong> {{ image.exclusion.hiddenBy }} ／ <strong>media query:</strong> {{ image.exclusion.mediaCondition }}</p>
                         <ul v-if="image.evidence.length" class="evidence-list"><li v-for="(evidence, index) in image.evidence" :key="index">{{ evidence }}</li></ul>
                       </div>
                     </article>

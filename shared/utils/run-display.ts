@@ -1,4 +1,4 @@
-import type { Finding, RunResult, RunStatus, Verdict } from '../types/run'
+import type { Finding, ImageResult, RunResult, RunStatus, Verdict } from '../types/run'
 
 export const activeRunStatuses: readonly RunStatus[] = [
   'queued',
@@ -26,7 +26,8 @@ const verdictPriority: Record<Verdict, number> = {
   ng: 0,
   needs_review: 1,
   unchecked: 2,
-  ok: 3,
+  excluded: 3,
+  ok: 4,
 }
 
 export function highestFindingVerdict(findings: Finding[]): Verdict {
@@ -35,6 +36,95 @@ export function highestFindingVerdict(findings: Finding[]): Verdict {
 
 export function sortFindings(findings: Finding[]): Finding[] {
   return [...findings].sort((left, right) => verdictPriority[left.verdict] - verdictPriority[right.verdict])
+}
+
+export function imageVerdictCounts(images: ImageResult[]) {
+  return {
+    ng: images.filter(image => image.verdict === 'ng').length,
+    needsReview: images.filter(image => image.verdict === 'needs_review').length,
+    unchecked: images.filter(image => image.verdict === 'unchecked').length,
+    excluded: images.filter(image => image.verdict === 'excluded').length,
+    ok: images.filter(image => image.verdict === 'ok').length,
+  }
+}
+
+const GOOGLE_NETWORK_EVIDENCE_PREFIX = 'Google関連通信: '
+
+export interface GoogleNetworkEvidenceGroup {
+  key: string
+  hosts: string[]
+  path: string
+  detectedId: string
+  eventName: string | null
+  sendTo: string | null
+  occurrences: number
+  urls: string[]
+}
+
+export interface GoogleEvidenceSummary {
+  notes: string[]
+  networkGroups: GoogleNetworkEvidenceGroup[]
+}
+
+export function summarizeGoogleEvidence(evidence: string[], fallbackId: string): GoogleEvidenceSummary {
+  const notes: string[] = []
+  const groups = new Map<string, GoogleNetworkEvidenceGroup>()
+  for (const item of evidence) {
+    if (!item.startsWith(GOOGLE_NETWORK_EVIDENCE_PREFIX)) {
+      notes.push(item)
+      continue
+    }
+    const rawUrl = item.slice(GOOGLE_NETWORK_EVIDENCE_PREFIX.length)
+    try {
+      const url = new URL(rawUrl)
+      const detectedId = url.searchParams.get('tid') ?? url.searchParams.get('id') ?? fallbackId
+      const eventName = url.searchParams.get('en')
+      const sendTo = url.searchParams.get('send_to')
+      const key = [url.pathname, detectedId, eventName ?? '', sendTo ?? ''].join('|')
+      const group = groups.get(key) ?? {
+        key,
+        hosts: [],
+        path: url.pathname,
+        detectedId,
+        eventName,
+        sendTo,
+        occurrences: 0,
+        urls: [],
+      }
+      if (!group.hosts.includes(url.hostname)) group.hosts.push(url.hostname)
+      group.occurrences += 1
+      if (!group.urls.includes(rawUrl)) group.urls.push(rawUrl)
+      groups.set(key, group)
+    } catch {
+      notes.push(item)
+    }
+  }
+  return { notes, networkGroups: [...groups.values()] }
+}
+
+export async function copyGoogleNetworkUrl(
+  url: string,
+  write?: (value: string) => Promise<void>,
+): Promise<void> {
+  if (write) {
+    await write(url)
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(url)
+    return
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = url
+    textarea.setAttribute('readonly', '')
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.append(textarea)
+    textarea.select()
+    const copied = document.execCommand('copy')
+    textarea.remove()
+    if (!copied) throw new Error('URLをコピーできませんでした。')
+  }
 }
 
 export type TextDiffKind = 'equal' | 'removed' | 'added'
