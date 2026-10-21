@@ -184,6 +184,7 @@ describe('Phase 3実行基盤', () => {
     })
 
     const prepared = await engine.prepare(project.projectId)
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const result = await engine.execute(prepared)
 
     expect(aiInputBuilder).toHaveBeenCalledOnce()
@@ -192,9 +193,16 @@ describe('Phase 3実行基盤', () => {
     expect(result.ai).toMatchObject({
       mode: 'manual',
       status: 'preparation_failed',
-      error: { code: 'AI_INPUT_PREPARATION_FAILED' },
+      error: { code: 'AI_INPUT_BUNDLE_GENERATION_FAILED' },
     })
     expect(JSON.stringify(result)).not.toContain('secret failure detail')
+    expect(JSON.stringify(errorLog.mock.calls)).toContain('bundle_generation')
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('secret failure detail')
+    const events = await readFile(join(runStore.runDir(project.projectId, result.runId), 'events.jsonl'), 'utf8')
+    expect(events).toContain('AI_INPUT_BUNDLE_GENERATION_FAILED')
+    expect(events).toContain('"stage":"bundle_generation"')
+    expect(events).not.toContain('secret failure detail')
+    errorLog.mockRestore()
   })
 
   it('AI用リンク先取得だけが失敗した場合も機械リンク判定を変更しない', async () => {
@@ -245,7 +253,7 @@ describe('Phase 3実行基盤', () => {
 
     expect(result.status).toBe('completed')
     expect(result.links[0]).toMatchObject({ verdict: 'ok', status: 200 })
-    expect(result.ai).toMatchObject({ mode: 'manual', status: 'input_ready' })
+    expect(result.ai).toMatchObject({ mode: 'manual', status: 'awaiting_manual' })
     expect(result.ai?.inputBundle?.items[0]?.target.fetchStatus).toBe('fetch_failed')
     expect(result.summary.ng).toBe(0)
   })

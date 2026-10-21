@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import { describe, expect, it, vi } from 'vitest'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AI_BODY_EXCERPT_LIMIT,
   AI_SOURCE_CONTEXT_LIMIT,
@@ -7,6 +9,7 @@ import {
   buildAiInputBundle,
   extractAiTargetContent,
   limitCodePoints,
+  loadOrCreateAiSigningKey,
   verifyAiInputBundle,
   type AiSourceCandidate,
 } from '~/server/services/ai-input'
@@ -18,6 +21,11 @@ const projectId = '11111111-1111-4111-8111-111111111111'
 const runId = '22222222-2222-4222-8222-222222222222'
 const bundleId = '33333333-3333-4333-8333-333333333333'
 const signingKey = randomBytes(32)
+const temporaryDirectories: string[] = []
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map(path => rm(path, { recursive: true, force: true })))
+})
 
 describe('Phase 5-A AI入力共通基盤', () => {
   it('日本語と絵文字をコードポイント単位で前後200文字に切り出す', () => {
@@ -61,6 +69,36 @@ describe('Phase 5-A AI入力共通基盤', () => {
     expect(url.value).not.toContain('user:pass')
     expect(url.value).not.toContain('secret')
     expect(url.maskedCategories).toEqual(expect.arrayContaining(['url_credentials', 'url_query_secret']))
+  })
+
+  it('上限長の文章がマスキングで伸長しても、マスキング後の値を契約上限へ収める', async () => {
+    const email = 'a@b.co'
+    const beforeText = `${'前'.repeat(194)}${email}`
+    const afterText = `${email}${'後'.repeat(194)}`
+    const body = `${email}${'本'.repeat(AI_BODY_EXCERPT_LIMIT - Array.from(email).length)}`
+    const bundle = await buildAiInputBundle({
+      projectId,
+      runId,
+      candidates: [{ ...candidate('masked-limit'), beforeText, afterText }],
+      probe: {
+        probe: async url => ({
+          requestedUrl: url,
+          finalUrl: url,
+          status: 200,
+          contentType: 'text/html',
+          redirectCount: 0,
+          body: `<html><head><title>確認</title></head><body><p>${body}</p></body></html>`,
+        }),
+      },
+      signingKey,
+      createBundleId: () => bundleId,
+    })
+
+    expect(Array.from(bundle.items[0]!.source.beforeText)).toHaveLength(AI_SOURCE_CONTEXT_LIMIT)
+    expect(Array.from(bundle.items[0]!.source.afterText)).toHaveLength(AI_SOURCE_CONTEXT_LIMIT)
+    expect(Array.from(bundle.items[0]!.target.bodyExcerpt)).toHaveLength(AI_BODY_EXCERPT_LIMIT)
+    expect(JSON.stringify(bundle)).not.toContain(email)
+    expect(aiInputBundleSchema.safeParse(bundle).success).toBe(true)
   })
 
   it('複数URLを含む識別子と不正URLでも再帰せず秘密値をマスクする', () => {
@@ -154,6 +192,20 @@ describe('Phase 5-A AI入力共通基盤', () => {
     tampered.items[0]!.source.linkText = '改変'
     expect(() => verifyAiInputBundle(tampered, signingKey)).toThrow('ハッシュ')
     expect(() => verifyAiInputBundle(bundle, randomBytes(32))).toThrow('署名')
+  })
+
+  it('環境鍵がなくてもローカル署名鍵を生成し、再起動相当でも同じ鍵を再利用する', async () => {
+    const directory = await mkdtemp(join(process.cwd(), '.test-data-ai-signing-'))
+    temporaryDirectories.push(directory)
+    const projectsDir = join(directory, 'projects')
+
+    const first = await loadOrCreateAiSigningKey(projectsDir)
+    const second = await loadOrCreateAiSigningKey(projectsDir)
+    const stored = await readFile(join(directory, '.ai-signing-key'), 'utf8')
+
+    expect(first).toHaveLength(32)
+    expect(second.equals(first)).toBe(true)
+    expect(Buffer.from(stored.trim(), 'base64').equals(first)).toBe(true)
   })
 
   it('SSRFで拒否されたリダイレクトは取得失敗として保持し、入力生成全体を失敗させない', async () => {

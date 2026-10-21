@@ -85,6 +85,8 @@ export interface AiOutputBundle {
   schemaVersion: 1
   kind: 'web-check-ai-output'
   contractVersion: string
+  promptVersion: string
+  projectId: string
   runId: string
   inputBundleId: string
   inputPayloadHash: string
@@ -95,7 +97,20 @@ export interface AiOutputBundle {
   judgments: AiJudgment[]
 }
 
-export type AiPreparationStatus = 'disabled' | 'preparing' | 'input_ready' | 'preparation_failed'
+export type AiPreparationStatus =
+  | 'disabled'
+  | 'preparing'
+  | 'input_ready'
+  | 'awaiting_manual'
+  | 'no_targets'
+  | 'completed'
+  | 'preparation_failed'
+
+export interface AiManualResult {
+  output: AiOutputBundle
+  importedAt: string
+  outputHash: string
+}
 
 export interface AiRunData {
   mode: AiMode
@@ -103,6 +118,7 @@ export interface AiRunData {
   contractVersion: string
   promptVersion: string
   inputBundle?: AiInputBundle
+  manualResult?: AiManualResult
   error?: {
     code: string
     message: string

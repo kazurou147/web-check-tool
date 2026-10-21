@@ -1,4 +1,6 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type {
   AiInputBundle,
@@ -10,9 +12,26 @@ import type { LinkProbe } from './checks/links'
 import { AiMaskingAccumulator } from './ai-masking'
 
 export const AI_CONTRACT_VERSION = '1.0.0'
-export const AI_PROMPT_VERSION = '1.0.0'
+export const AI_PROMPT_VERSION = '1.1.0'
 export const AI_SOURCE_CONTEXT_LIMIT = 200
 export const AI_BODY_EXCERPT_LIMIT = 3_000
+const AI_SIGNING_KEY_FILE = '.ai-signing-key'
+
+export class AiSigningKeyError extends Error {
+  constructor(message: string, readonly code: 'AI_SIGNING_KEY_INVALID' | 'AI_SIGNING_KEY_IO_FAILED') {
+    super(message)
+  }
+}
+
+export class AiInputBuildError extends Error {
+  constructor(
+    readonly code: 'AI_INPUT_ITEM_BUILD_FAILED' | 'AI_INPUT_SCHEMA_INVALID',
+    readonly failurePoint: 'item_build' | 'schema_validation',
+    readonly safeDetails: { itemSequence?: number; issuePaths?: string[]; issueCodes?: string[] },
+  ) {
+    super(code)
+  }
+}
 
 export interface AiSourceCandidate {
   linkResultKey: string
@@ -104,31 +123,35 @@ export async function buildAiInputBundle(options: BuildAiInputBundleOptions): Pr
   const items: AiLinkInput[] = []
 
   for (const group of grouped) {
-    const primary = group.candidates[0]!
-    const rawTarget = await getTarget(primary.resolvedUrl, options.probe, targetCache)
-    const masking = new AiMaskingAccumulator()
-    const source = {
-      pageUrl: masking.url(primary.pageUrl),
-      linkText: masking.text(primary.linkText),
-      beforeText: masking.text(limitCodePoints(primary.beforeText, AI_SOURCE_CONTEXT_LIMIT, 'end')),
-      afterText: masking.text(limitCodePoints(primary.afterText, AI_SOURCE_CONTEXT_LIMIT, 'start')),
+    try {
+      const primary = group.candidates[0]!
+      const rawTarget = await getTarget(primary.resolvedUrl, options.probe, targetCache)
+      const masking = new AiMaskingAccumulator()
+      const source = {
+        pageUrl: maskAndLimit(masking, 'url', primary.pageUrl, 4_096, 'start'),
+        linkText: maskAndLimit(masking, 'text', primary.linkText, 10_000, 'start'),
+        beforeText: maskAndLimit(masking, 'text', primary.beforeText, AI_SOURCE_CONTEXT_LIMIT, 'end'),
+        afterText: maskAndLimit(masking, 'text', primary.afterText, AI_SOURCE_CONTEXT_LIMIT, 'start'),
+      }
+      const sourceReferences = group.candidates.map(candidate => ({
+        linkResultKey: maskAndLimit(masking, 'text', candidate.linkResultKey, 8_192, 'start'),
+        pageUrl: maskAndLimit(masking, 'url', candidate.pageUrl, 4_096, 'start'),
+      }))
+      const target = maskTarget(rawTarget, masking)
+      const itemId = `ai_${sha256(`ai-item-v1\n${group.dedupeKey}`)}`
+      const inputHash = sha256(stableStringify({ source, sourceReferences, target }))
+      items.push({
+        sequence: items.length,
+        itemId,
+        inputHash,
+        source,
+        sourceReferences,
+        target,
+        masking: masking.summary(),
+      })
+    } catch {
+      throw new AiInputBuildError('AI_INPUT_ITEM_BUILD_FAILED', 'item_build', { itemSequence: items.length })
     }
-    const sourceReferences = group.candidates.map(candidate => ({
-      linkResultKey: masking.text(candidate.linkResultKey),
-      pageUrl: masking.url(candidate.pageUrl),
-    }))
-    const target = maskTarget(rawTarget, masking)
-    const itemId = `ai_${sha256(`ai-item-v1\n${group.dedupeKey}`)}`
-    const inputHash = sha256(stableStringify({ source, sourceReferences, target }))
-    items.push({
-      sequence: items.length,
-      itemId,
-      inputHash,
-      source,
-      sourceReferences,
-      target,
-      masking: masking.summary(),
-    })
   }
 
   const unsigned = {
@@ -153,7 +176,14 @@ export async function buildAiInputBundle(options: BuildAiInputBundleOptions): Pr
       signature: hmac(payload, options.signingKey),
     },
   }
-  return aiInputBundleSchema.parse(bundle)
+  const parsed = aiInputBundleSchema.safeParse(bundle)
+  if (!parsed.success) {
+    throw new AiInputBuildError('AI_INPUT_SCHEMA_INVALID', 'schema_validation', {
+      issuePaths: [...new Set(parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean))].slice(0, 20),
+      issueCodes: [...new Set(parsed.error.issues.map(issue => issue.code))].slice(0, 20),
+    })
+  }
+  return parsed.data
 }
 
 export function verifyAiInputBundle(value: unknown, signingKey: Uint8Array): AiInputBundle {
@@ -174,6 +204,50 @@ export function deriveAiSigningKey(masterKey: string | undefined): Buffer {
     : Buffer.from(masterKey, 'base64')
   if (decoded.byteLength !== 32) throw new Error('AI入力署名用の暗号鍵は32バイトで指定してください')
   return createHmac('sha256', decoded).update('website-delivery-checker:ai-input-signing:v1').digest()
+}
+
+export async function loadOrCreateAiSigningKey(projectsDir: string, masterKey?: string): Promise<Buffer> {
+  const keyPath = join(dirname(projectsDir), AI_SIGNING_KEY_FILE)
+  try {
+    return decodeStoredSigningKey(await readFile(keyPath, 'utf8'))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      if (error instanceof AiSigningKeyError) throw error
+      throw new AiSigningKeyError('AI署名鍵を読み込めませんでした。', 'AI_SIGNING_KEY_IO_FAILED')
+    }
+  }
+
+  let key: Buffer
+  try {
+    key = masterKey ? deriveAiSigningKey(masterKey) : randomBytes(32)
+  } catch {
+    throw new AiSigningKeyError('AI署名鍵の設定が不正です。', 'AI_SIGNING_KEY_INVALID')
+  }
+
+  try {
+    await mkdir(dirname(keyPath), { recursive: true })
+    await writeFile(keyPath, `${key.toString('base64')}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    return key
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      try {
+        return decodeStoredSigningKey(await readFile(keyPath, 'utf8'))
+      } catch {
+        throw new AiSigningKeyError('AI署名鍵を読み込めませんでした。', 'AI_SIGNING_KEY_IO_FAILED')
+      }
+    }
+    throw new AiSigningKeyError('AI署名鍵を保存できませんでした。', 'AI_SIGNING_KEY_IO_FAILED')
+  }
+}
+
+function decodeStoredSigningKey(value: string): Buffer {
+  try {
+    const decoded = Buffer.from(value.trim(), 'base64')
+    if (decoded.byteLength !== 32) throw new Error('invalid length')
+    return decoded
+  } catch {
+    throw new AiSigningKeyError('保存済みAI署名鍵の形式が不正です。', 'AI_SIGNING_KEY_INVALID')
+  }
 }
 
 export function extractAiTargetContent(html: string): Pick<AiLinkTarget, 'title' | 'headings' | 'bodyExcerpt'> {
@@ -215,10 +289,10 @@ function groupCandidates(candidates: AiSourceCandidate[]): CandidateGroup[] {
     if (!normalizedUrl) continue
     const sourceMasking = new AiMaskingAccumulator()
     const dedupeKey = sha256(stableStringify({
-      linkText: sourceMasking.text(candidate.linkText),
-      beforeText: sourceMasking.text(limitCodePoints(candidate.beforeText, AI_SOURCE_CONTEXT_LIMIT, 'end')),
-      afterText: sourceMasking.text(limitCodePoints(candidate.afterText, AI_SOURCE_CONTEXT_LIMIT, 'start')),
-      normalizedUrl: sourceMasking.url(normalizedUrl),
+      linkText: maskAndLimit(sourceMasking, 'text', candidate.linkText, 10_000, 'start'),
+      beforeText: maskAndLimit(sourceMasking, 'text', candidate.beforeText, AI_SOURCE_CONTEXT_LIMIT, 'end'),
+      afterText: maskAndLimit(sourceMasking, 'text', candidate.afterText, AI_SOURCE_CONTEXT_LIMIT, 'start'),
+      normalizedUrl: maskAndLimit(sourceMasking, 'url', normalizedUrl, 4_096, 'start'),
     }))
     const group = groups.get(dedupeKey)
     if (group) group.candidates.push(candidate)
@@ -285,14 +359,29 @@ function unavailable(
 
 function maskTarget(value: RawTarget, masking: AiMaskingAccumulator): AiLinkTarget {
   return {
-    normalizedUrl: masking.url(value.normalizedUrl),
-    finalUrl: value.finalUrl ? masking.url(value.finalUrl) : undefined,
-    title: value.title ? masking.text(value.title) : undefined,
-    headings: value.headings.map(heading => ({ ...heading, text: masking.text(heading.text) })),
-    bodyExcerpt: masking.text(value.bodyExcerpt),
+    normalizedUrl: maskAndLimit(masking, 'url', value.normalizedUrl, 4_096, 'start'),
+    finalUrl: value.finalUrl ? maskAndLimit(masking, 'url', value.finalUrl, 4_096, 'start') : undefined,
+    title: value.title ? maskAndLimit(masking, 'text', value.title, 10_000, 'start') : undefined,
+    headings: value.headings.map(heading => ({
+      ...heading,
+      text: maskAndLimit(masking, 'text', heading.text, 10_000, 'start'),
+    })),
+    bodyExcerpt: maskAndLimit(masking, 'text', value.bodyExcerpt, AI_BODY_EXCERPT_LIMIT, 'start'),
     fetchStatus: value.fetchStatus,
-    unavailableReason: value.unavailableReason ? masking.text(value.unavailableReason) : undefined,
+    unavailableReason: value.unavailableReason
+      ? maskAndLimit(masking, 'text', value.unavailableReason, 2_000, 'start')
+      : undefined,
   }
+}
+
+function maskAndLimit(
+  masking: AiMaskingAccumulator,
+  kind: 'text' | 'url',
+  value: string,
+  limit: number,
+  side: 'start' | 'end',
+): string {
+  return limitCodePoints(kind === 'url' ? masking.url(value) : masking.text(value), limit, side)
 }
 
 function removeNonContent(value: string): string {

@@ -52,6 +52,21 @@ function submit() {
     </label>
 
     <fieldset>
+      <legend>AIリンク内容判定</legend>
+      <label>
+        判定モード
+        <select v-model="form.settings.ai.mode">
+          <option value="off">OFF：AI判定を使用しない</option>
+          <option value="manual">MANUAL：Codexで手動判定する</option>
+          <option value="api" disabled>API：OpenAI APIで自動判定する（Phase 5-Cで実装予定）</option>
+        </select>
+      </label>
+      <p v-if="form.settings.ai.mode === 'manual'" class="hint">
+        検査後にマスキング済みJSONをダウンロードし、Codexの判定結果JSONを取り込みます。自動マスキングですべての個人情報を検出できるとは限りません。
+      </p>
+    </fieldset>
+
+    <fieldset>
       <legend>認証</legend>
       <label>
         認証方式

@@ -19,8 +19,9 @@ import { checkMetadata } from './checks/metadata'
 import {
   AI_CONTRACT_VERSION,
   AI_PROMPT_VERSION,
+  AiInputBuildError,
   buildAiInputBundle,
-  deriveAiSigningKey,
+  loadOrCreateAiSigningKey,
   type AiSourceCandidate,
   type BuildAiInputBundleOptions,
 } from './ai-input'
@@ -48,7 +49,7 @@ export interface RunEngineDependencies {
   linkProbeFactory: LinkProbeFactory
   now: () => Date
   aiInputBuilder?: (options: BuildAiInputBundleOptions) => Promise<AiInputBundle>
-  aiSigningKey?: () => Uint8Array
+  aiSigningKey?: () => Uint8Array | Promise<Uint8Array>
 }
 
 export class RunEngine {
@@ -58,6 +59,9 @@ export class RunEngine {
     const project = await this.dependencies.projectStore.get(projectId)
     if (project.archivedAt) throw new ArchivedProjectError('アーカイブ中の案件では検査を開始できません')
     if (!project.excelFileName) throw new RunInputError('Excelファイルが登録されていません')
+    if (project.settings.ai.mode === 'api') {
+      throw new RunInputError('OpenAI APIによる自動判定はPhase 5-Cまで利用できません。')
+    }
 
     const input = await readExcelInput(this.dependencies.projectStore.excelPath(projectId), project.excelFileName)
     if (!input.canStart) throw new RunInputError('Excel入力に致命的な問題があるため検査を開始できません')
@@ -116,24 +120,49 @@ export class RunEngine {
       await Promise.all(Array.from({ length: workerCount }, () => this.worker(queue, input, result, inspector!, probe, aiCandidates)))
       if (project.settings.ai.mode !== 'off') {
         await this.transition(result, 'ai_checking')
+        let preparationStage: 'signing_key' | 'bundle_generation' = 'signing_key'
         try {
+          const signingKey = await (this.dependencies.aiSigningKey ?? (() => loadOrCreateAiSigningKey(
+            this.dependencies.projectStore.projectsDir,
+            process.env.APP_ENCRYPTION_KEY,
+          )))()
+          preparationStage = 'bundle_generation'
           result.ai!.inputBundle = await (this.dependencies.aiInputBuilder ?? buildAiInputBundle)({
             projectId: project.projectId,
             runId: result.runId,
             candidates: aiCandidates,
             probe,
-            signingKey: (this.dependencies.aiSigningKey ?? (() => deriveAiSigningKey(process.env.APP_ENCRYPTION_KEY)))(),
+            signingKey,
             now: this.dependencies.now,
           })
-          result.ai!.status = 'input_ready'
+          result.ai!.status = result.ai!.inputBundle.items.length === 0 ? 'no_targets' : 'awaiting_manual'
           await this.event(result, 'ai_input_ready', { itemCount: result.ai!.inputBundle.items.length })
-        } catch {
+        } catch (error) {
+          const diagnostic = aiPreparationDiagnostic(preparationStage)
           result.ai!.status = 'preparation_failed'
           result.ai!.error = {
-            code: 'AI_INPUT_PREPARATION_FAILED',
-            message: 'AI判定用入力データを準備できませんでした。機械検査結果は保持されています。',
+            code: diagnostic.code,
+            message: diagnostic.message,
           }
-          await this.event(result, 'ai_input_failed', { code: result.ai!.error.code })
+          console.error('[ai-input] preparation failed', {
+            projectId: result.projectId,
+            runId: result.runId,
+            stage: preparationStage,
+            code: diagnostic.code,
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+            ...(error instanceof AiInputBuildError ? {
+              failurePoint: error.failurePoint,
+              ...error.safeDetails,
+            } : {}),
+          })
+          await this.event(result, 'ai_input_failed', {
+            code: diagnostic.code,
+            stage: preparationStage,
+            ...(error instanceof AiInputBuildError ? {
+              failurePoint: error.failurePoint,
+              ...error.safeDetails,
+            } : {}),
+          })
         }
       }
       result.status = 'completed'
@@ -276,6 +305,19 @@ export class RunEngine {
       type,
       ...details,
     })
+  }
+}
+
+function aiPreparationDiagnostic(stage: 'signing_key' | 'bundle_generation'): { code: string; message: string } {
+  if (stage === 'signing_key') {
+    return {
+      code: 'AI_SIGNING_KEY_PREPARATION_FAILED',
+      message: 'AI入力の署名鍵を準備できませんでした。データ保存先の署名鍵ファイルと書き込み権限を確認してください。機械検査結果は保持されています。',
+    }
+  }
+  return {
+    code: 'AI_INPUT_BUNDLE_GENERATION_FAILED',
+    message: 'AI判定用入力データを生成できませんでした。機械検査結果は保持されています。',
   }
 }
 

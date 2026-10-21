@@ -31,4 +31,13 @@ describe('案件入力検証', () => {
     }
     expect(projectMutationSchema.safeParse({ name: '案件', settings }).success).toBe(false)
   })
+
+  it('MANUALを受理し、未実装のAPIモードを拒否する', () => {
+    const manual = defaultProjectSettings()
+    manual.ai.mode = 'manual'
+    expect(projectMutationSchema.safeParse({ name: '手動判定', settings: manual }).success).toBe(true)
+    const api = defaultProjectSettings()
+    api.ai.mode = 'api'
+    expect(projectMutationSchema.safeParse({ name: 'API判定', settings: api }).success).toBe(false)
+  })
 })

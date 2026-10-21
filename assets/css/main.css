@@ -127,6 +127,18 @@ th { color: var(--muted); font-size: .75rem; white-space: nowrap; }
 .verdict-metrics .ok { border-top-color: #2f7a58; }
 .result-context { display: flex; gap: .45rem; flex-wrap: wrap; }
 .result-context span { border-radius: 999px; padding: .4rem .65rem; background: #eef1ee; color: #4d5952; font-size: .75rem; font-weight: 800; }
+.ai-manual-panel { border: 1px solid var(--line); border-radius: 13px; padding: 1rem; background: #fbfcfa; }
+.ai-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .55rem; }
+.ai-metrics > div { display: grid; gap: .15rem; min-width: 0; border: 1px solid var(--line); border-top: 3px solid #809087; border-radius: 9px; padding: .65rem; background: #fff; }
+.ai-metrics .ok { border-top-color: #2f7a58; }
+.ai-metrics .needs_review { border-top-color: #d39a24; }
+.ai-metrics .unchecked { border-top-color: #8b918d; }
+.ai-metrics strong { font-size: 1.25rem; }
+.ai-metrics span { color: var(--muted); font-size: .7rem; font-weight: 850; }
+.button-row { display: flex; gap: .6rem; flex-wrap: wrap; }
+.visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; }
+.ai-detail-row { min-width: 0; }
+.ai-context { white-space: pre-wrap; overflow-wrap: anywhere; }
 .page-results { display: grid; gap: .75rem; }
 .empty-inline { margin: 0; border: 1px dashed #adb8b0; border-radius: 12px; padding: 1.25rem; color: var(--muted); text-align: center; }
 .page-result { overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
@@ -214,6 +226,7 @@ th { color: var(--muted); font-size: .75rem; white-space: nowrap; }
   .run-history { position: static; max-height: 18rem; }
   .run-times { text-align: left; }
   .verdict-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ai-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .page-result > summary { grid-template-columns: auto minmax(0, 1fr); }
   .page-meta { grid-column: 2; white-space: normal; }
   .value-comparison { grid-template-columns: 1fr; }

@@ -10,7 +10,7 @@ export class RunNotFoundError extends Error {}
 export class RunStore {
   private readonly writeQueues = new Map<string, Promise<void>>()
 
-  constructor(private readonly projectsDir: string) {}
+  constructor(readonly projectsDir: string) {}
 
   runDir(projectId: string, runId: string): string {
     projectIdSchema.parse(projectId)
@@ -31,14 +31,30 @@ export class RunStore {
   async saveResult(projectId: string, runId: string, result: RunResult): Promise<void> {
     const path = join(this.runDir(projectId, runId), 'result.json')
     const content = serialize(result)
-    const previous = this.writeQueues.get(path) ?? Promise.resolve()
-    const pending = previous.catch(() => undefined).then(() => atomicWrite(path, content))
-    this.writeQueues.set(path, pending)
-    try {
-      await pending
-    } finally {
-      if (this.writeQueues.get(path) === pending) this.writeQueues.delete(path)
-    }
+    await this.enqueue(path, () => atomicWrite(path, content))
+  }
+
+  async updateResult<T>(
+    projectId: string,
+    runId: string,
+    update: (result: RunResult) => T | Promise<T>,
+  ): Promise<{ result: RunResult; value: T }> {
+    const path = join(this.runDir(projectId, runId), 'result.json')
+    return await this.enqueue(path, async () => {
+      let result: RunResult
+      try {
+        result = normalizeLegacyRun(JSON.parse(await readFile(path, 'utf8')) as RunResult)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RunNotFoundError('検査結果が見つかりません')
+        throw error
+      }
+      if (result.schemaVersion !== 1 || result.projectId !== projectId || result.runId !== runId) {
+        throw new Error('検査結果の形式が不正です')
+      }
+      const value = await update(result)
+      await atomicWrite(path, serialize(result))
+      return { result, value }
+    })
   }
 
   async appendEvent(projectId: string, runId: string, event: Record<string, unknown>): Promise<void> {
@@ -95,6 +111,20 @@ export class RunStore {
         summary: result.summary,
         fatalError: result.fatalError,
       }))
+  }
+
+  private async enqueue<T>(path: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.writeQueues.get(path) ?? Promise.resolve()
+    let resolveTail!: () => void
+    const tail = new Promise<void>(resolve => { resolveTail = resolve })
+    this.writeQueues.set(path, tail)
+    await previous.catch(() => undefined)
+    try {
+      return await task()
+    } finally {
+      resolveTail()
+      if (this.writeQueues.get(path) === tail) this.writeQueues.delete(path)
+    }
   }
 }
 

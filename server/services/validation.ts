@@ -51,6 +51,13 @@ export const projectMutationSchema = z.object({
     form: credentialsSchema.optional(),
   }).optional(),
 }).superRefine((value, context) => {
+  if (value.settings.ai.mode === 'api') {
+    context.addIssue({
+      code: 'custom',
+      path: ['settings', 'ai', 'mode'],
+      message: 'OpenAI APIによる自動判定はPhase 5-Cまで利用できません',
+    })
+  }
   const mode = value.settings.auth.mode
   if (mode !== 'none' && value.secrets && !value.secrets[mode]) {
     context.addIssue({

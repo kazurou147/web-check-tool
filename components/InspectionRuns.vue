@@ -10,6 +10,8 @@ import type {
   RunSummary,
   Verdict,
 } from '~/shared/types/run'
+import type { AiPreparationStatus, AiVerdict } from '~/shared/types/ai'
+import { buildCodexManualInstructions, judgmentByItemId, manualAiCounts, manualAiQualityWarnings } from '~/shared/utils/manual-ai'
 import { highestFindingVerdict, imageVerdictCounts, isActiveRun, runProgress, sortFindings } from '~/shared/utils/run-display'
 
 const props = defineProps<{
@@ -33,12 +35,19 @@ const loadingResult = ref(false)
 const polling = ref(false)
 const runMessage = ref('')
 const runMessageKind = ref<'success' | 'error'>('success')
+const importingAi = ref(false)
+const downloadingAi = ref(false)
+const aiFileInput = ref<HTMLInputElement | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
 const progress = computed(() => result.value ? runProgress(result.value) : { completed: 0, total: 0, percent: 0 })
 const activeResult = computed(() => Boolean(result.value && isActiveRun(result.value.status)))
 const hasActiveRun = computed(() => activeResult.value || runs.value.some(run => isActiveRun(run.status)))
 const canStart = computed(() => props.hasExcel && !props.archived && !starting.value && !hasActiveRun.value)
+const aiCounts = computed(() => manualAiCounts(result.value?.ai))
+const aiJudgments = computed(() => judgmentByItemId(result.value?.ai))
+const aiItems = computed(() => result.value?.ai?.inputBundle?.items ?? [])
+const aiQualityWarnings = computed(() => manualAiQualityWarnings(result.value?.ai))
 
 onMounted(async () => {
   if (selectedRunId.value) await loadRun(selectedRunId.value, false)
@@ -96,6 +105,65 @@ async function loadRun(runId: string, updateRoute = true) {
 async function refreshHistory() {
   const response = await $fetch<{ runs: RunSummary[] }>(`/api/projects/${props.projectId}/runs`)
   runs.value = response.runs
+}
+
+async function downloadAiInput() {
+  if (!result.value?.ai?.inputBundle || !selectedRunId.value) return
+  const confirmed = window.confirm('自動マスキングですべての個人情報を検出できるとは限りません。内容を確認したうえでCodexへ添付してください。ダウンロードしますか？')
+  if (!confirmed) return
+  downloadingAi.value = true
+  try {
+    const response = await fetch(`/api/projects/${props.projectId}/runs/${selectedRunId.value}/ai/input`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({})) as { statusMessage?: string }
+      throw new Error(error.statusMessage ?? 'AI判定用JSONをダウンロードできませんでした。')
+    }
+    const url = URL.createObjectURL(await response.blob())
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `web-check-ai-input-${selectedRunId.value}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    setRunMessage('AI判定用JSONをダウンロードしました。', 'success')
+  } catch (caught) {
+    setRunMessage(caught instanceof Error ? caught.message : 'AI判定用JSONをダウンロードできませんでした。', 'error')
+  } finally {
+    downloadingAi.value = false
+  }
+}
+
+async function copyCodexInstructions() {
+  const bundle = result.value?.ai?.inputBundle
+  if (!bundle) return
+  try {
+    await navigator.clipboard.writeText(buildCodexManualInstructions(bundle))
+    setRunMessage('Codex用の指示文をコピーしました。', 'success')
+  } catch {
+    setRunMessage('指示文をコピーできませんでした。ブラウザのクリップボード権限を確認してください。', 'error')
+  }
+}
+
+async function importAiResult(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || !selectedRunId.value) return
+  importingAi.value = true
+  try {
+    const body = new FormData()
+    body.append('file', file)
+    const response = await $fetch<{ result: RunResult; idempotent: boolean; message: string }>(
+      `/api/projects/${props.projectId}/runs/${selectedRunId.value}/ai/import`,
+      { method: 'POST', body },
+    )
+    result.value = response.result
+    setRunMessage(response.message, 'success')
+    await refreshHistory().catch(() => undefined)
+  } catch (caught) {
+    setRunMessage(getErrorMessage(caught), 'error')
+  } finally {
+    importingAi.value = false
+    input.value = ''
+  }
 }
 
 function syncPolling() {
@@ -214,6 +282,22 @@ const installationMethodLabels: Record<GoogleTagDetection['installationMethod'],
   google_tag: '直接設置Googleタグ',
   unknown: '不明',
 }
+
+const aiModeLabels = { off: 'OFF', manual: 'MANUAL', api: 'API' } as const
+const aiStatusLabels: Record<AiPreparationStatus, string> = {
+  disabled: 'AI判定なし',
+  preparing: '入力準備中',
+  input_ready: '手動判定待ち（旧形式）',
+  awaiting_manual: '手動判定待ち',
+  no_targets: '判定対象なし',
+  completed: '判定完了',
+  preparation_failed: '入力準備失敗',
+}
+const aiVerdictLabels: Record<AiVerdict, string> = {
+  match: 'OK',
+  possible_mismatch: '要確認',
+  undetermined: '判定不可',
+}
 </script>
 
 <template>
@@ -299,6 +383,67 @@ const installationMethodLabels: Record<GoogleTagDetection['installationMethod'],
             <span>不正・欠落URL {{ result.input.invalidRows.length }}</span>
             <span>固有ページ {{ result.input.uniqueUrlCount }}</span>
           </div>
+
+          <section v-if="result.ai" class="ai-manual-panel stack">
+            <div class="section-title-row">
+              <h3>AIリンク内容判定</h3>
+              <span>{{ aiModeLabels[result.ai.mode] }} ／ {{ aiStatusLabels[result.ai.status] }}</span>
+            </div>
+            <p v-if="result.ai.error" class="notice error">{{ result.ai.error.message }}</p>
+            <p v-else-if="result.ai.mode === 'off'" class="empty-inline">この検査はAI判定OFFで実行されました。機械検査結果だけを表示しています。</p>
+            <p v-else-if="result.ai.status === 'no_targets'" class="notice">AI判定対象のテキストリンクは0件でした。</p>
+
+            <template v-if="result.ai.mode === 'manual' && result.ai.inputBundle">
+              <div class="ai-metrics" aria-label="AI判定集計">
+                <div><strong>{{ aiCounts.sourceLinkCount }}</strong><span>元リンク</span></div>
+                <div><strong>{{ aiCounts.targetCount }}</strong><span>重複排除後</span></div>
+                <div><strong>{{ aiCounts.completedCount }}</strong><span>判定完了</span></div>
+                <div class="ok"><strong>{{ aiCounts.ok }}</strong><span>OK</span></div>
+                <div class="needs_review"><strong>{{ aiCounts.needsReview }}</strong><span>要確認計</span></div>
+                <div class="unchecked"><strong>{{ aiCounts.undetermined }}</strong><span>判定不可</span></div>
+              </div>
+              <p class="notice">自動マスキングですべての個人情報を検出できるとは限りません。ダウンロードしたJSONをCodexへ渡す前に内容を確認してください。</p>
+              <p v-for="warning in aiQualityWarnings" :key="warning.code" class="notice error">{{ warning.message }}</p>
+              <div v-if="aiCounts.targetCount" class="button-row">
+                <button class="button" type="button" :disabled="downloadingAi" @click="downloadAiInput">
+                  {{ downloadingAi ? 'ダウンロード準備中…' : 'AI判定用JSONをダウンロード' }}
+                </button>
+                <button class="button" type="button" @click="copyCodexInstructions">Codex用の指示文をコピー</button>
+                <button class="button primary" type="button" :disabled="importingAi" @click="aiFileInput?.click()">
+                  {{ importingAi ? '取り込み中…' : 'AI判定結果JSONを取り込む' }}
+                </button>
+                <input ref="aiFileInput" class="visually-hidden" type="file" accept=".json,application/json" @change="importAiResult">
+              </div>
+              <p v-if="result.ai.manualResult" class="hint">取り込み日時: {{ formatDate(result.ai.manualResult.importedAt) }}</p>
+
+              <details v-if="result.ai.manualResult" class="detail-group" open>
+                <summary>AI判定詳細（{{ aiCounts.completedCount }}件）</summary>
+                <div class="detail-list">
+                  <article v-for="item in aiItems" :key="item.itemId" class="detail-row ai-detail-row">
+                    <span
+                      v-if="aiJudgments.get(item.itemId)"
+                      class="verdict-badge"
+                      :class="aiJudgments.get(item.itemId)!.verdict === 'match' ? 'ok' : 'needs_review'"
+                    >{{ aiVerdictLabels[aiJudgments.get(item.itemId)!.verdict] }}</span>
+                    <div>
+                      <strong class="long-value">{{ item.source.linkText || '（リンク文言なし）' }}</strong>
+                      <p class="long-value"><strong>リンク元:</strong> {{ item.source.pageUrl }}</p>
+                      <p class="long-value"><strong>リンク先:</strong> {{ item.target.finalUrl || item.target.normalizedUrl }}</p>
+                      <p><strong>判定理由:</strong> {{ aiJudgments.get(item.itemId)?.reason }}</p>
+                      <details>
+                        <summary>周辺文章・対応する元リンク（{{ item.sourceReferences.length }}件）</summary>
+                        <p class="ai-context"><strong>直前:</strong> {{ item.source.beforeText || '（なし）' }}</p>
+                        <p class="ai-context"><strong>直後:</strong> {{ item.source.afterText || '（なし）' }}</p>
+                        <ul class="evidence-list">
+                          <li v-for="source in item.sourceReferences" :key="source.linkResultKey" class="long-value">{{ source.pageUrl }} ／ {{ source.linkResultKey }}</li>
+                        </ul>
+                      </details>
+                    </div>
+                  </article>
+                </div>
+              </details>
+            </template>
+          </section>
 
           <div class="page-results">
             <div class="section-title-row">
