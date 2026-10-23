@@ -7,8 +7,10 @@ import type { LinkProbe } from '~/server/services/checks/links'
 import { PageInspectionError, withPageRetries, type PageInspection, type WebsiteInspector } from '~/server/services/playwright-inspector'
 import { buildFailedPageResult, RunEngine } from '~/server/services/run-engine'
 import { RunStore } from '~/server/services/run-store'
+import type { AiInputBundle } from '~/shared/types/ai'
 import { defaultProjectSettings } from '~/shared/types/project'
 import type { InputPageRow } from '~/shared/types/excel-input'
+import { manualAiQualityInput } from './fixtures/manual-ai-quality'
 
 const temporaryDirectories: string[] = []
 
@@ -102,6 +104,7 @@ describe('Phase 3実行基盤', () => {
     const runStore = new RunStore(projectStore.projectsDir)
     let time = Date.parse('2026-10-20T00:00:00.000Z')
     const aiInputBuilder = vi.fn(async () => { throw new Error('OFFでは呼び出してはいけません') })
+    const aiApiRunner = vi.fn(async () => { throw new Error('OFFでは呼び出してはいけません') })
     const engine = new RunEngine({
       projectStore,
       runStore,
@@ -109,6 +112,7 @@ describe('Phase 3実行基盤', () => {
       linkProbeFactory: () => ({ probe: async url => ({ requestedUrl: url, finalUrl: url, status: 200, contentType: 'text/html', redirectCount: 0 }) }),
       now: () => new Date(time += 1_000),
       aiInputBuilder,
+      aiApiRunner,
     })
 
     const prepared = await engine.prepare(project.projectId)
@@ -128,6 +132,7 @@ describe('Phase 3実行基盤', () => {
     expect(result.summary.unchecked).toBe(5)
     expect(result.ai).toMatchObject({ mode: 'off', status: 'disabled' })
     expect(aiInputBuilder).not.toHaveBeenCalled()
+    expect(aiApiRunner).not.toHaveBeenCalled()
 
     const resultPath = join(projectStore.projectsDir, project.projectId, 'runs', result.runId, 'result.json')
     const persisted = JSON.parse(await readFile(resultPath, 'utf8'))
@@ -136,10 +141,13 @@ describe('Phase 3実行基盤', () => {
 
     delete persisted.ai
     delete persisted.configSnapshot.aiMode
+    delete persisted.aiUsage.cachedInputTokens
+    delete persisted.aiUsage.apiFailureCount
     await writeFile(resultPath, `${JSON.stringify(persisted, null, 2)}\n`)
     const legacyLoaded = await runStore.get(project.projectId, result.runId)
     expect(legacyLoaded.configSnapshot.aiMode).toBe('off')
     expect(legacyLoaded.ai).toMatchObject({ mode: 'off', status: 'disabled' })
+    expect(legacyLoaded.aiUsage).toMatchObject({ cachedInputTokens: 0, apiFailureCount: 0 })
 
     const history = await runStore.list(project.projectId)
     expect(history).toHaveLength(1)
@@ -256,6 +264,95 @@ describe('Phase 3実行基盤', () => {
     expect(result.ai).toMatchObject({ mode: 'manual', status: 'awaiting_manual' })
     expect(result.ai?.inputBundle?.items[0]?.target.fetchStatus).toBe('fetch_failed')
     expect(result.summary.ng).toBe(0)
+  })
+
+  it('MANUALではAPIを呼び出さず、APIでは共通結果を保存して機械判定を変更しない', async () => {
+    const directory = await mkdtemp(join(process.cwd(), '.test-data-phase5c-run-'))
+    temporaryDirectories.push(directory)
+    const projectStore = new ProjectStore(directory)
+    const settings = defaultProjectSettings()
+    settings.ai.mode = 'manual'
+    const project = await projectStore.create('Phase 5-C fixture', settings)
+    const workbook = new ExcelJS.Workbook()
+    const pages = workbook.addWorksheet('納品前のチェック')
+    pages.addRow(['ページ名', 'URL', 'title', 'description'])
+    pages.addRow(['トップ', 'https://example.com/', 'Title', 'Description'])
+    workbook.addWorksheet('Googleタグ').addRow(['タグ名', '設置コード'])
+    await projectStore.saveExcel(project.projectId, 'fixture.xlsx', new Uint8Array(await workbook.xlsx.writeBuffer()))
+
+    const inspector: WebsiteInspector = {
+      authenticate: async () => undefined,
+      close: async () => undefined,
+      inspect: async url => successfulInspection(url),
+    }
+    const runStore = new RunStore(projectStore.projectsDir)
+    const buildBundle = vi.fn(async ({ projectId, runId }: { projectId: string, runId: string }) => ({
+      ...manualAiQualityInput,
+      projectId,
+      runId,
+    }) as AiInputBundle)
+    const aiApiRunner = vi.fn(async ({ input }: { input: AiInputBundle }) => ({
+      output: {
+        schemaVersion: input.schemaVersion,
+        kind: 'web-check-ai-output' as const,
+        contractVersion: input.contractVersion,
+        promptVersion: input.promptVersion,
+        projectId: input.projectId,
+        runId: input.runId,
+        inputBundleId: input.bundleId,
+        inputPayloadHash: input.integrity.payloadHash,
+        judge: { mode: 'api' as const, model: 'gpt-6-luna' },
+        judgments: input.items.map(item => ({
+          itemId: item.itemId,
+          inputHash: item.inputHash,
+          verdict: 'match' as const,
+          reason: `「${item.source.linkText}」とリンク先の主題が一致しています。`,
+        })),
+      },
+      usage: {
+        inputTokens: 800,
+        cachedInputTokens: 100,
+        outputTokens: 240,
+        estimatedCostUsd: 0.000191,
+        costLimitUsd: 1,
+        stoppedByCostLimit: false,
+        apiFailureCount: 0,
+      },
+      failedCount: 0,
+    }))
+    const createEngine = () => new RunEngine({
+      projectStore,
+      runStore,
+      inspectorFactory: async () => inspector,
+      linkProbeFactory: () => ({ probe: async url => ({ requestedUrl: url, finalUrl: url, status: 200, contentType: 'text/html', redirectCount: 0 }) }),
+      now: () => new Date('2026-10-22T00:00:00.000Z'),
+      aiInputBuilder: buildBundle,
+      aiSigningKey: () => new Uint8Array(32),
+      aiApiRunner,
+      openAiApiKey: () => 'sk-test-not-persisted',
+    })
+
+    const manual = await createEngine().execute(await createEngine().prepare(project.projectId))
+    expect(manual.ai?.status).toBe('awaiting_manual')
+    expect(aiApiRunner).not.toHaveBeenCalled()
+
+    const updated = await projectStore.get(project.projectId)
+    updated.settings.ai.mode = 'api'
+    await projectStore.update(updated.projectId, { settings: updated.settings })
+    const apiEngine = createEngine()
+    const api = await apiEngine.execute(await apiEngine.prepare(project.projectId))
+    expect(aiApiRunner).toHaveBeenCalledOnce()
+    expect(api.status).toBe('completed')
+    expect(api.ai).toMatchObject({ mode: 'api', status: 'completed', model: 'gpt-6-luna' })
+    expect(api.ai?.priceProfile).toMatchObject({
+      profileId: 'gpt-6-luna-standard-2026-10-22',
+      modelId: 'gpt-6-luna',
+      inputUsdPerMillionTokens: 0.1,
+      outputUsdPerMillionTokens: 0.5,
+    })
+    expect(api.aiUsage).toMatchObject({ inputTokens: 800, cachedInputTokens: 100, outputTokens: 240, apiFailureCount: 0 })
+    expect(api.summary).toMatchObject({ ng: 0, needsReview: 0, unchecked: 0 })
+    expect(JSON.stringify(api)).not.toContain('sk-test-not-persisted')
   })
 })
 

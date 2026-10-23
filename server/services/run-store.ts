@@ -130,9 +130,22 @@ export class RunStore {
 
 function normalizeLegacyRun(value: RunResult): RunResult {
   const mode = value.configSnapshot.aiMode ?? 'off'
+  const aiUsage = value.aiUsage ?? {
+    enabled: mode !== 'off',
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: 0,
+    costLimitUsd: 1,
+    stoppedByCostLimit: false,
+  }
   return {
     ...value,
     configSnapshot: { ...value.configSnapshot, aiMode: mode },
+    aiUsage: {
+      ...aiUsage,
+      cachedInputTokens: aiUsage.cachedInputTokens ?? 0,
+      apiFailureCount: aiUsage.apiFailureCount ?? 0,
+    },
     ai: value.ai ?? {
       mode,
       status: mode === 'off' ? 'disabled' : 'preparation_failed',

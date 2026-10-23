@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "defaultProfileId": "gpt-6-luna-standard-2026-10-22",
+  "profiles": [
+    {
+      "profileId": "gpt-6-luna-standard-2026-10-22",
+      "label": "GPT-6 Luna 標準料金（2026-10-22確認）",
+      "modelId": "gpt-6-luna",
+      "inputUsdPerMillionTokens": 0.1,
+      "cachedInputUsdPerMillionTokens": 0.01,
+      "outputUsdPerMillionTokens": 0.5,
+      "currency": "USD",
+      "effectiveDate": "2026-10-22",
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-6-luna"
+    }
+  ]
+}

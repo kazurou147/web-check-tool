@@ -1,6 +1,18 @@
 export type AiMode = 'off' | 'manual' | 'api'
 export type AiVerdict = 'match' | 'possible_mismatch' | 'undetermined'
 
+export interface AiPriceProfile {
+  profileId: string
+  label: string
+  modelId: string
+  inputUsdPerMillionTokens: number
+  cachedInputUsdPerMillionTokens: number
+  outputUsdPerMillionTokens: number
+  currency: 'USD'
+  effectiveDate: string
+  sourceUrl: string
+}
+
 export type AiTargetFetchStatus =
   | 'available'
   | 'unsupported_protocol'
@@ -16,6 +28,10 @@ export interface AiSourceReference {
 
 export interface AiLinkSource {
   pageUrl: string
+  /** 解決済みの元リンクURL。フラグメントを保持し、HTTP取得用URLとは区別する。 */
+  linkUrl?: string
+  urlFragment?: string
+  isSamePageAnchor?: boolean
   linkText: string
   beforeText: string
   afterText: string
@@ -26,6 +42,14 @@ export interface AiTargetHeading {
   text: string
 }
 
+export interface AiAnchorTarget {
+  fragment: string
+  found: boolean
+  targetId?: string
+  heading?: AiTargetHeading
+  surroundingText?: string
+}
+
 export interface AiLinkTarget {
   normalizedUrl: string
   finalUrl?: string
@@ -34,6 +58,7 @@ export interface AiLinkTarget {
   bodyExcerpt: string
   fetchStatus: AiTargetFetchStatus
   unavailableReason?: string
+  anchor?: AiAnchorTarget
 }
 
 export interface AiMaskingSummary {
@@ -103,6 +128,8 @@ export type AiPreparationStatus =
   | 'input_ready'
   | 'awaiting_manual'
   | 'no_targets'
+  | 'api_checking'
+  | 'api_failed'
   | 'completed'
   | 'preparation_failed'
 
@@ -112,6 +139,12 @@ export interface AiManualResult {
   outputHash: string
 }
 
+export interface AiApiResult {
+  output: AiOutputBundle
+  completedAt: string
+  failedCount: number
+}
+
 export interface AiRunData {
   mode: AiMode
   status: AiPreparationStatus
@@ -119,6 +152,9 @@ export interface AiRunData {
   promptVersion: string
   inputBundle?: AiInputBundle
   manualResult?: AiManualResult
+  apiResult?: AiApiResult
+  model?: string
+  priceProfile?: AiPriceProfile
   error?: {
     code: string
     message: string

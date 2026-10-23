@@ -1,4 +1,5 @@
 import type { AiMode } from './ai'
+import { DEFAULT_AI_MODEL, DEFAULT_AI_PRICE_PROFILE_ID } from '~/shared/config/ai-pricing'
 
 export type AuthMode = 'none' | 'basic' | 'form'
 
@@ -8,6 +9,9 @@ export interface ProjectSettings {
   allowedPrivateHosts: string[]
   ai: {
     mode: AiMode
+    model: string
+    priceProfileId: string
+    costLimitUsd: number
   }
   auth: {
     mode: AuthMode
@@ -51,6 +55,9 @@ export const defaultProjectSettings = (): ProjectSettings => ({
   allowedPrivateHosts: [],
   ai: {
     mode: 'off',
+    model: DEFAULT_AI_MODEL,
+    priceProfileId: DEFAULT_AI_PRICE_PROFILE_ID,
+    costLimitUsd: 1,
   },
   auth: {
     mode: 'none',

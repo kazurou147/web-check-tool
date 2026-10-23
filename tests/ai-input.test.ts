@@ -7,6 +7,7 @@ import {
   AI_SOURCE_CONTEXT_LIMIT,
   aiInputBundleSchema,
   buildAiInputBundle,
+  extractAnchorTarget,
   extractAiTargetContent,
   limitCodePoints,
   loadOrCreateAiSigningKey,
@@ -142,6 +143,161 @@ describe('Phase 5-A AI入力共通基盤', () => {
     expect(probe).toHaveBeenCalledTimes(1)
     expect(probe).toHaveBeenCalledWith('https://target.example/dogs', true)
     expect(bundle.contentTreatment).toBe('untrusted_data')
+  })
+
+  it('正常な同一ページ内アンカーのURL・対象ID・見出し・周辺文を保持し、HTTP取得にはフラグメントを送らない', async () => {
+    const probe = vi.fn(async (url: string) => ({
+      requestedUrl: url,
+      finalUrl: url,
+      status: 200,
+      contentType: 'text/html',
+      redirectCount: 0,
+      body: '<title>規約</title><body><p>前の説明</p><h2 id="contact">お問い合わせ</h2><p>フォームからご連絡ください。secret@example.com</p></body>',
+    }))
+    const bundle = await buildAiInputBundle({
+      projectId,
+      runId,
+      candidates: [{
+        ...candidate('same-page-anchor'),
+        pageUrl: 'https://source.example/privacy',
+        href: '#contact',
+        resolvedUrl: 'https://source.example/privacy#contact',
+        linkText: 'お問い合わせ',
+      }],
+      probe: { probe },
+      signingKey,
+      createBundleId: () => bundleId,
+    })
+
+    expect(probe).toHaveBeenCalledWith('https://source.example/privacy', true)
+    expect(bundle.items[0]!.source).toMatchObject({
+      linkUrl: 'https://source.example/privacy#contact',
+      urlFragment: 'contact',
+      isSamePageAnchor: true,
+    })
+    expect(bundle.items[0]!.target.anchor).toMatchObject({
+      fragment: 'contact',
+      found: true,
+      targetId: 'contact',
+      heading: { level: 2, text: 'お問い合わせ' },
+    })
+    expect(bundle.items[0]!.target.anchor?.surroundingText).toContain('フォームからご連絡ください')
+    expect(JSON.stringify(bundle)).not.toContain('secret@example.com')
+  })
+
+  it('異なるページへのアンカーを同一ページ扱いせず、取得先から対象要素を抽出する', async () => {
+    const probe = vi.fn(async (url: string) => ({
+      requestedUrl: url,
+      finalUrl: url,
+      status: 200,
+      contentType: 'text/html',
+      redirectCount: 0,
+      body: '<body><h3 id="details">料金詳細</h3><p>月額料金を説明します。</p></body>',
+    }))
+    const bundle = await buildAiInputBundle({
+      projectId,
+      runId,
+      candidates: [{ ...candidate('cross-page-anchor'), resolvedUrl: 'https://target.example/pricing#details' }],
+      probe: { probe },
+      signingKey,
+      createBundleId: () => bundleId,
+    })
+
+    expect(bundle.items[0]!.source.isSamePageAnchor).toBe(false)
+    expect(bundle.items[0]!.target.anchor?.heading).toEqual({ level: 3, text: '料金詳細' })
+    expect(probe).toHaveBeenCalledWith('https://target.example/pricing', true)
+  })
+
+  it('同じ取得URLでも異なるフラグメントは別itemとし、HTML取得だけを共有する', async () => {
+    const probe = vi.fn(async (url: string) => ({
+      requestedUrl: url,
+      finalUrl: url,
+      status: 200,
+      contentType: 'text/html',
+      redirectCount: 0,
+      body: '<body><h2 id="first">第一章</h2><p>一つ目</p><h2 id="second">第二章</h2><p>二つ目</p></body>',
+    }))
+    const base = { ...candidate('fragment-one'), linkText: '章へ', beforeText: '', afterText: '' }
+    const bundle = await buildAiInputBundle({
+      projectId,
+      runId,
+      candidates: [
+        { ...base, resolvedUrl: 'https://target.example/guide#first' },
+        { ...base, linkResultKey: 'fragment-two', resolvedUrl: 'https://target.example/guide#second' },
+      ],
+      probe: { probe },
+      signingKey,
+      createBundleId: () => bundleId,
+    })
+
+    expect(bundle.items).toHaveLength(2)
+    expect(new Set(bundle.items.map(item => item.itemId)).size).toBe(2)
+    expect(bundle.items.map(item => item.source.urlFragment).sort()).toEqual(['first', 'second'])
+    expect(bundle.items.map(item => item.target.anchor?.targetId).sort()).toEqual(['first', 'second'])
+    expect(probe).toHaveBeenCalledTimes(1)
+  })
+
+  it('存在しないフラグメントはfound=falseとして保持し、通常リンクにはアンカー情報を付けない', async () => {
+    const probe = vi.fn(async (url: string) => ({
+      requestedUrl: url,
+      finalUrl: url,
+      status: 200,
+      contentType: 'text/html',
+      redirectCount: 0,
+      body: '<body><h1 id="present">存在する見出し</h1></body>',
+    }))
+    const bundle = await buildAiInputBundle({
+      projectId,
+      runId,
+      candidates: [
+        { ...candidate('missing-anchor'), linkText: '不足', resolvedUrl: 'https://target.example/dogs#missing' },
+        { ...candidate('normal-link'), linkText: '通常', resolvedUrl: 'https://target.example/dogs' },
+      ],
+      probe: { probe },
+      signingKey,
+      createBundleId: () => bundleId,
+    })
+    const missing = bundle.items.find(item => item.source.urlFragment === 'missing')!
+    const normal = bundle.items.find(item => item.source.linkText === '通常')!
+
+    expect(missing.target.anchor).toEqual({ fragment: 'missing', found: false })
+    expect(normal.source.urlFragment).toBeUndefined()
+    expect(normal.source.isSamePageAnchor).toBe(false)
+    expect(normal.target.anchor).toBeUndefined()
+  })
+
+  it('旧AI入力のsource・targetにアンカー拡張がなくても読み込める', async () => {
+    const bundle = await buildAiInputBundle({
+      projectId,
+      runId,
+      candidates: [candidate('legacy-compatible')],
+      probe: successfulProbe(),
+      signingKey,
+      createBundleId: () => bundleId,
+    })
+    const legacy = structuredClone(bundle) as unknown as Record<string, unknown>
+    const item = (legacy.items as Array<Record<string, unknown>>)[0]!
+    const source = item.source as Record<string, unknown>
+    delete source.linkUrl
+    delete source.urlFragment
+    delete source.isSamePageAnchor
+    delete (item.target as Record<string, unknown>).anchor
+    legacy.contractVersion = '1.0.0'
+    legacy.promptVersion = '1.1.0'
+
+    expect(aiInputBundleSchema.safeParse(legacy).success).toBe(true)
+  })
+
+  it('アンカー抽出はURLエンコードされた日本語IDとa[name]に対応する', () => {
+    expect(extractAnchorTarget('<body><h2 id="お問い合わせ">連絡先</h2></body>', '%E3%81%8A%E5%95%8F%E3%81%84%E5%90%88%E3%82%8F%E3%81%9B')).toMatchObject({
+      found: true,
+      targetId: 'お問い合わせ',
+      heading: { level: 2, text: '連絡先' },
+    })
+    expect(extractAnchorTarget('<body><a name="legacy"></a><p>旧形式の位置</p></body>', 'legacy')).toMatchObject({
+      found: true,
+      targetId: 'legacy',
+    })
   })
 
   it('PDFは取得せず取得不能理由を保持する', async () => {

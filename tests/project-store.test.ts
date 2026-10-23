@@ -39,7 +39,12 @@ describe('ProjectStore', () => {
     await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`)
 
     const loaded = await store.get(project.projectId)
-    expect(loaded.settings.ai).toEqual({ mode: 'off' })
+    expect(loaded.settings.ai).toEqual({
+      mode: 'off',
+      model: 'gpt-6-luna',
+      priceProfileId: 'gpt-6-luna-standard-2026-10-22',
+      costLimitUsd: 1,
+    })
   })
 
   it('Excelをcurrent.xlsxへコピーし、渡された原本バイト列を変更しない', async () => {

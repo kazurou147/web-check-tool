@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { DEFAULT_AI_MODEL, DEFAULT_AI_PRICE_PROFILE_ID, findMatchingAiPriceProfile } from '~/shared/config/ai-pricing'
 
 const authSettingsSchema = z.discriminatedUnion('mode', [
   z.object({
@@ -32,7 +33,10 @@ export const projectSettingsSchema = z.object({
   navigationTimeoutMs: z.number().int().min(1_000).max(120_000),
   ai: z.object({
     mode: z.enum(['off', 'manual', 'api']),
-  }).default({ mode: 'off' }),
+    model: z.string().min(1).max(100).default(DEFAULT_AI_MODEL),
+    priceProfileId: z.string().min(1).max(200).default(DEFAULT_AI_PRICE_PROFILE_ID),
+    costLimitUsd: z.number().finite().min(0.01).max(1_000).default(1),
+  }).default({ mode: 'off', model: DEFAULT_AI_MODEL, priceProfileId: DEFAULT_AI_PRICE_PROFILE_ID, costLimitUsd: 1 }),
   allowedPrivateHosts: z.array(z.string().trim().min(1).max(253)
     .regex(/^(?:\[[0-9a-f:]+\]|[0-9a-z.-]+)$/i, 'ホスト名だけを入力してください')).max(50).default([]),
   auth: authSettingsSchema,
@@ -51,11 +55,11 @@ export const projectMutationSchema = z.object({
     form: credentialsSchema.optional(),
   }).optional(),
 }).superRefine((value, context) => {
-  if (value.settings.ai.mode === 'api') {
+  if (value.settings.ai.mode === 'api' && !findMatchingAiPriceProfile(value.settings.ai.priceProfileId, value.settings.ai.model)) {
     context.addIssue({
       code: 'custom',
-      path: ['settings', 'ai', 'mode'],
-      message: 'OpenAI APIによる自動判定はPhase 5-Cまで利用できません',
+      path: ['settings', 'ai', 'priceProfileId'],
+      message: '選択したモデルに対応する料金プロファイルがありません',
     })
   }
   const mode = value.settings.auth.mode

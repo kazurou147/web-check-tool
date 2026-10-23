@@ -41,6 +41,9 @@ describe('MANUAL判定品質', () => {
     const instructions = buildCodexManualInstructions(manualAiQualityInput)
     for (const required of [
       'source.linkText、source.beforeText、source.afterText',
+      'source.urlFragment',
+      'target.anchor.headingとtarget.anchor.surroundingTextを優先',
+      'フラグメント名だけから推測でmatchにせずundetermined',
       '他itemの判定や理由を流用してはいけません',
       'target.headingsが空なら見出しを根拠に挙げてはいけません',
       '存在しない情報を補完・想像しないでください',

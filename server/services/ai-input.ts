@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type {
   AiInputBundle,
+  AiAnchorTarget,
   AiLinkInput,
   AiLinkTarget,
   AiTargetHeading,
@@ -11,10 +12,11 @@ import type {
 import type { LinkProbe } from './checks/links'
 import { AiMaskingAccumulator } from './ai-masking'
 
-export const AI_CONTRACT_VERSION = '1.0.0'
-export const AI_PROMPT_VERSION = '1.1.0'
+export const AI_CONTRACT_VERSION = '1.1.0'
+export const AI_PROMPT_VERSION = '1.2.0'
 export const AI_SOURCE_CONTEXT_LIMIT = 200
 export const AI_BODY_EXCERPT_LIMIT = 3_000
+export const AI_ANCHOR_CONTEXT_LIMIT = 500
 const AI_SIGNING_KEY_FILE = '.ai-signing-key'
 
 export class AiSigningKeyError extends Error {
@@ -64,6 +66,14 @@ const headingSchema = z.object({
   text: z.string().max(10_000),
 }).strict()
 
+const anchorTargetSchema = z.object({
+  fragment: z.string().min(1).max(4_096),
+  found: z.boolean(),
+  targetId: z.string().min(1).max(4_096).optional(),
+  heading: headingSchema.optional(),
+  surroundingText: codePointString(AI_ANCHOR_CONTEXT_LIMIT).optional(),
+}).strict()
+
 const sourceReferenceSchema = z.object({
   linkResultKey: z.string().min(1).max(8_192),
   pageUrl: z.string().min(1).max(4_096),
@@ -82,6 +92,9 @@ const aiLinkInputSchema = z.object({
   inputHash: z.string().regex(/^[0-9a-f]{64}$/),
   source: z.object({
     pageUrl: z.string().min(1).max(4_096),
+    linkUrl: z.string().min(1).max(4_096).optional(),
+    urlFragment: z.string().min(1).max(4_096).optional(),
+    isSamePageAnchor: z.boolean().optional(),
     linkText: z.string().max(10_000),
     beforeText: codePointString(AI_SOURCE_CONTEXT_LIMIT),
     afterText: codePointString(AI_SOURCE_CONTEXT_LIMIT),
@@ -95,6 +108,7 @@ const aiLinkInputSchema = z.object({
     bodyExcerpt: codePointString(AI_BODY_EXCERPT_LIMIT),
     fetchStatus: z.enum(['available', 'unsupported_protocol', 'pdf', 'http_error', 'non_html', 'fetch_failed']),
     unavailableReason: z.string().max(2_000).optional(),
+    anchor: anchorTargetSchema.optional(),
   }).strict(),
   masking: maskingSchema,
 }).strict()
@@ -129,6 +143,7 @@ export async function buildAiInputBundle(options: BuildAiInputBundleOptions): Pr
       const masking = new AiMaskingAccumulator()
       const source = {
         pageUrl: maskAndLimit(masking, 'url', primary.pageUrl, 4_096, 'start'),
+        ...buildSourceNavigation(primary, masking),
         linkText: maskAndLimit(masking, 'text', primary.linkText, 10_000, 'start'),
         beforeText: maskAndLimit(masking, 'text', primary.beforeText, AI_SOURCE_CONTEXT_LIMIT, 'end'),
         afterText: maskAndLimit(masking, 'text', primary.afterText, AI_SOURCE_CONTEXT_LIMIT, 'start'),
@@ -293,6 +308,7 @@ function groupCandidates(candidates: AiSourceCandidate[]): CandidateGroup[] {
       beforeText: maskAndLimit(sourceMasking, 'text', candidate.beforeText, AI_SOURCE_CONTEXT_LIMIT, 'end'),
       afterText: maskAndLimit(sourceMasking, 'text', candidate.afterText, AI_SOURCE_CONTEXT_LIMIT, 'start'),
       normalizedUrl: maskAndLimit(sourceMasking, 'url', normalizedUrl, 4_096, 'start'),
+      linkUrl: maskAndLimit(sourceMasking, 'url', resolvedHttpUrl(candidate.resolvedUrl) ?? candidate.resolvedUrl, 4_096, 'start'),
     }))
     const group = groups.get(dedupeKey)
     if (group) group.candidates.push(candidate)
@@ -322,7 +338,7 @@ async function getTarget(value: string, probe: LinkProbe, cache: Map<string, Pro
   }
   const pending = cache.get(normalizedUrl) ?? fetchTarget(normalizedUrl, probe)
   cache.set(normalizedUrl, pending)
-  return pending
+  return addAnchorTarget(await pending, extractUrlFragment(value))
 }
 
 async function fetchTarget(normalizedUrl: string, probe: LinkProbe): Promise<RawTarget> {
@@ -340,13 +356,17 @@ async function fetchTarget(normalizedUrl: string, probe: LinkProbe): Promise<Raw
       finalUrl: response.finalUrl,
       ...extracted,
       fetchStatus: 'available',
+      rawHtml: response.body ?? '',
     }
   } catch {
     return unavailable(normalizedUrl, 'fetch_failed', 'AI判定用のリンク先情報を安全に取得できませんでした。')
   }
 }
 
-interface RawTarget extends AiLinkTarget {}
+interface RawTarget extends AiLinkTarget {
+  /** アンカー抽出専用。マスキング済みAI入力には含めない。 */
+  rawHtml?: string
+}
 
 function unavailable(
   normalizedUrl: string,
@@ -371,7 +391,119 @@ function maskTarget(value: RawTarget, masking: AiMaskingAccumulator): AiLinkTarg
     unavailableReason: value.unavailableReason
       ? maskAndLimit(masking, 'text', value.unavailableReason, 2_000, 'start')
       : undefined,
+    anchor: value.anchor
+      ? {
+          fragment: maskAndLimit(masking, 'text', value.anchor.fragment, 4_096, 'start'),
+          found: value.anchor.found,
+          targetId: value.anchor.targetId
+            ? maskAndLimit(masking, 'text', value.anchor.targetId, 4_096, 'start')
+            : undefined,
+          heading: value.anchor.heading
+            ? { ...value.anchor.heading, text: maskAndLimit(masking, 'text', value.anchor.heading.text, 10_000, 'start') }
+            : undefined,
+          surroundingText: value.anchor.surroundingText
+            ? maskAndLimit(masking, 'text', value.anchor.surroundingText, AI_ANCHOR_CONTEXT_LIMIT, 'start')
+            : undefined,
+        }
+      : undefined,
   }
+}
+
+function buildSourceNavigation(candidate: AiSourceCandidate, masking: AiMaskingAccumulator): Pick<AiLinkInput['source'], 'linkUrl' | 'urlFragment' | 'isSamePageAnchor'> {
+  const linkUrl = resolvedHttpUrl(candidate.resolvedUrl)
+  if (!linkUrl) return {}
+  const fragment = extractUrlFragment(linkUrl)
+  return {
+    linkUrl: maskAndLimit(masking, 'url', linkUrl, 4_096, 'start'),
+    urlFragment: fragment ? maskAndLimit(masking, 'text', fragment, 4_096, 'start') : undefined,
+    isSamePageAnchor: fragment ? sameDocumentUrl(candidate.pageUrl, linkUrl) : false,
+  }
+}
+
+function resolvedHttpUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function extractUrlFragment(value: string): string | undefined {
+  try {
+    const hash = new URL(value).hash
+    if (!hash || hash === '#') return undefined
+    return decodeURIComponentSafe(hash.slice(1))
+  } catch {
+    return undefined
+  }
+}
+
+function sameDocumentUrl(pageUrl: string, linkUrl: string): boolean {
+  try {
+    const page = new URL(pageUrl)
+    const link = new URL(linkUrl)
+    page.hash = ''
+    link.hash = ''
+    return page.href === link.href
+  } catch {
+    return false
+  }
+}
+
+function addAnchorTarget(target: RawTarget, fragment: string | undefined): RawTarget {
+  if (!fragment) return target
+  if (target.fetchStatus !== 'available' || !target.rawHtml) {
+    return { ...target, anchor: { fragment, found: false } }
+  }
+  return { ...target, anchor: extractAnchorTarget(target.rawHtml, fragment), rawHtml: undefined }
+}
+
+export function extractAnchorTarget(html: string, fragment: string): AiAnchorTarget {
+  const wanted = decodeURIComponentSafe(fragment)
+  const elementPattern = /<([a-z][\w:-]*)\b([^>]*)>/giu
+  for (const match of html.matchAll(elementPattern)) {
+    const attributes = match[2] ?? ''
+    const id = attributeValue(attributes, 'id') ?? attributeValue(attributes, 'name')
+    if (id === undefined || decodeHtmlEntities(id) !== wanted) continue
+
+    const tagName = (match[1] ?? '').toLowerCase()
+    const start = match.index ?? 0
+    const openEnd = start + match[0].length
+    const closePattern = new RegExp(`<\\/${escapeRegExp(tagName)}\\s*>`, 'giu')
+    closePattern.lastIndex = openEnd
+    const close = closePattern.exec(html)
+    const inner = close ? html.slice(openEnd, close.index) : ''
+    const elementText = htmlFragmentToText(removeNonContent(inner))
+    const surrounding = htmlFragmentToText(removeNonContent(html.slice(Math.max(0, start - 500), Math.min(html.length, (close?.index ?? openEnd) + 500))))
+    const level = /^h[1-3]$/u.test(tagName) ? Number(tagName.slice(1)) as 1 | 2 | 3 : undefined
+    return {
+      fragment: wanted,
+      found: true,
+      targetId: decodeHtmlEntities(id),
+      heading: level && elementText ? { level, text: elementText } : undefined,
+      surroundingText: limitCodePoints(surrounding || elementText, AI_ANCHOR_CONTEXT_LIMIT, 'start') || undefined,
+    }
+  }
+  return { fragment: wanted, found: false }
+}
+
+function attributeValue(attributes: string, name: string): string | undefined {
+  const pattern = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`, 'iu')
+  const match = pattern.exec(attributes)
+  return match ? (match[1] ?? match[2] ?? match[3] ?? '') : undefined
+}
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
 function maskAndLimit(

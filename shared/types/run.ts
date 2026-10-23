@@ -155,11 +155,13 @@ export interface RunResult {
   ai?: AiRunData
   aiUsage: {
     enabled: boolean
-    inputTokens: 0
-    outputTokens: 0
-    estimatedCostUsd: 0
+    inputTokens: number
+    cachedInputTokens: number
+    outputTokens: number
+    estimatedCostUsd: number
     costLimitUsd: number
-    stoppedByCostLimit: false
+    stoppedByCostLimit: boolean
+    apiFailureCount: number
   }
   fatalError?: SafeError
 }

@@ -290,6 +290,8 @@ const aiStatusLabels: Record<AiPreparationStatus, string> = {
   input_ready: '手動判定待ち（旧形式）',
   awaiting_manual: '手動判定待ち',
   no_targets: '判定対象なし',
+  api_checking: 'API判定中',
+  api_failed: 'API判定失敗',
   completed: '判定完了',
   preparation_failed: '入力準備失敗',
 }
@@ -393,7 +395,7 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
             <p v-else-if="result.ai.mode === 'off'" class="empty-inline">この検査はAI判定OFFで実行されました。機械検査結果だけを表示しています。</p>
             <p v-else-if="result.ai.status === 'no_targets'" class="notice">AI判定対象のテキストリンクは0件でした。</p>
 
-            <template v-if="result.ai.mode === 'manual' && result.ai.inputBundle">
+            <template v-if="result.ai.mode !== 'off' && result.ai.inputBundle">
               <div class="ai-metrics" aria-label="AI判定集計">
                 <div><strong>{{ aiCounts.sourceLinkCount }}</strong><span>元リンク</span></div>
                 <div><strong>{{ aiCounts.targetCount }}</strong><span>重複排除後</span></div>
@@ -402,9 +404,20 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
                 <div class="needs_review"><strong>{{ aiCounts.needsReview }}</strong><span>要確認計</span></div>
                 <div class="unchecked"><strong>{{ aiCounts.undetermined }}</strong><span>判定不可</span></div>
               </div>
-              <p class="notice">自動マスキングですべての個人情報を検出できるとは限りません。ダウンロードしたJSONをCodexへ渡す前に内容を確認してください。</p>
+              <p v-if="result.ai.mode === 'manual'" class="notice">自動マスキングですべての個人情報を検出できるとは限りません。ダウンロードしたJSONをCodexへ渡す前に内容を確認してください。</p>
+              <div v-else class="result-context">
+                <span>モデル {{ result.ai.model ?? '—' }}</span>
+                <span>入力 {{ result.aiUsage.inputTokens }} tokens</span>
+                <span>キャッシュ入力 {{ result.aiUsage.cachedInputTokens ?? 0 }} tokens</span>
+                <span>出力 {{ result.aiUsage.outputTokens }} tokens</span>
+                <span>概算 ${{ result.aiUsage.estimatedCostUsd.toFixed(6) }}</span>
+                <span>上限 ${{ result.aiUsage.costLimitUsd.toFixed(2) }}</span>
+                <span>API失敗 {{ result.aiUsage.apiFailureCount ?? 0 }}件</span>
+                <span>上限到達 {{ result.aiUsage.stoppedByCostLimit ? 'あり' : 'なし' }}</span>
+              </div>
+              <p v-if="result.ai.mode === 'api'" class="hint">料金は保存した価格プロファイルによる概算で、実際の請求額を保証しません。</p>
               <p v-for="warning in aiQualityWarnings" :key="warning.code" class="notice error">{{ warning.message }}</p>
-              <div v-if="aiCounts.targetCount" class="button-row">
+              <div v-if="result.ai.mode === 'manual' && aiCounts.targetCount" class="button-row">
                 <button class="button" type="button" :disabled="downloadingAi" @click="downloadAiInput">
                   {{ downloadingAi ? 'ダウンロード準備中…' : 'AI判定用JSONをダウンロード' }}
                 </button>
@@ -415,8 +428,9 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
                 <input ref="aiFileInput" class="visually-hidden" type="file" accept=".json,application/json" @change="importAiResult">
               </div>
               <p v-if="result.ai.manualResult" class="hint">取り込み日時: {{ formatDate(result.ai.manualResult.importedAt) }}</p>
+              <p v-if="result.ai.apiResult" class="hint">API判定更新日時: {{ formatDate(result.ai.apiResult.completedAt) }}</p>
 
-              <details v-if="result.ai.manualResult" class="detail-group" open>
+              <details v-if="result.ai.manualResult || result.ai.apiResult" class="detail-group" open>
                 <summary>AI判定詳細（{{ aiCounts.completedCount }}件）</summary>
                 <div class="detail-list">
                   <article v-for="item in aiItems" :key="item.itemId" class="detail-row ai-detail-row">

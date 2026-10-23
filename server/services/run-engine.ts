@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { DuplicateUrlGroup, InputPageRow, InputSnapshot } from '~/shared/types/excel-input'
 import type { Project, ProjectSecrets, ProjectSettings } from '~/shared/types/project'
 import type { AiInputBundle } from '~/shared/types/ai'
+import { findMatchingAiPriceProfile } from '~/shared/config/ai-pricing'
 import type {
   Finding,
   ImageResult,
@@ -25,6 +26,12 @@ import {
   type AiSourceCandidate,
   type BuildAiInputBundleOptions,
 } from './ai-input'
+import {
+  buildFailedAiApiResult,
+  runAiApiJudgment,
+  type AiApiExecutionResult,
+  type RunAiApiOptions,
+} from './ai-api'
 import { readExcelInput } from './excel-input'
 import { NetworkPolicy } from './network-policy'
 import {
@@ -50,6 +57,8 @@ export interface RunEngineDependencies {
   now: () => Date
   aiInputBuilder?: (options: BuildAiInputBundleOptions) => Promise<AiInputBundle>
   aiSigningKey?: () => Uint8Array | Promise<Uint8Array>
+  aiApiRunner?: (options: RunAiApiOptions) => Promise<AiApiExecutionResult>
+  openAiApiKey?: () => string | undefined
 }
 
 export class RunEngine {
@@ -59,10 +68,6 @@ export class RunEngine {
     const project = await this.dependencies.projectStore.get(projectId)
     if (project.archivedAt) throw new ArchivedProjectError('アーカイブ中の案件では検査を開始できません')
     if (!project.excelFileName) throw new RunInputError('Excelファイルが登録されていません')
-    if (project.settings.ai.mode === 'api') {
-      throw new RunInputError('OpenAI APIによる自動判定はPhase 5-Cまで利用できません。')
-    }
-
     const input = await readExcelInput(this.dependencies.projectStore.excelPath(projectId), project.excelFileName)
     if (!input.canStart) throw new RunInputError('Excel入力に致命的な問題があるため検査を開始できません')
     const secrets = project.settings.auth.mode === 'none'
@@ -89,14 +94,20 @@ export class RunEngine {
         status: project.settings.ai.mode === 'off' ? 'disabled' : 'preparing',
         contractVersion: AI_CONTRACT_VERSION,
         promptVersion: AI_PROMPT_VERSION,
+        ...(project.settings.ai.mode === 'api' ? {
+          model: project.settings.ai.model,
+          priceProfile: findMatchingAiPriceProfile(project.settings.ai.priceProfileId, project.settings.ai.model),
+        } : {}),
       },
       aiUsage: {
         enabled: project.settings.ai.mode !== 'off',
         inputTokens: 0,
+        cachedInputTokens: 0,
         outputTokens: 0,
         estimatedCostUsd: 0,
-        costLimitUsd: 1,
+        costLimitUsd: project.settings.ai.costLimitUsd,
         stoppedByCostLimit: false,
+        apiFailureCount: 0,
       },
     }
     await this.dependencies.runStore.create(projectId, runId, input, result)
@@ -121,6 +132,7 @@ export class RunEngine {
       if (project.settings.ai.mode !== 'off') {
         await this.transition(result, 'ai_checking')
         let preparationStage: 'signing_key' | 'bundle_generation' = 'signing_key'
+        let inputPrepared = false
         try {
           const signingKey = await (this.dependencies.aiSigningKey ?? (() => loadOrCreateAiSigningKey(
             this.dependencies.projectStore.projectsDir,
@@ -135,8 +147,11 @@ export class RunEngine {
             signingKey,
             now: this.dependencies.now,
           })
-          result.ai!.status = result.ai!.inputBundle.items.length === 0 ? 'no_targets' : 'awaiting_manual'
+          result.ai!.status = result.ai!.inputBundle.items.length === 0
+            ? 'no_targets'
+            : project.settings.ai.mode === 'manual' ? 'awaiting_manual' : 'api_checking'
           await this.event(result, 'ai_input_ready', { itemCount: result.ai!.inputBundle.items.length })
+          inputPrepared = true
         } catch (error) {
           const diagnostic = aiPreparationDiagnostic(preparationStage)
           result.ai!.status = 'preparation_failed'
@@ -164,6 +179,27 @@ export class RunEngine {
             } : {}),
           })
         }
+        if (inputPrepared && project.settings.ai.mode === 'api' && result.ai!.inputBundle!.items.length) {
+          try {
+            await this.executeApiJudgment(project, result)
+          } catch (error) {
+            const failed = buildFailedAiApiResult(
+              result.ai!.inputBundle!,
+              project.settings.ai.model,
+              project.settings.ai.costLimitUsd,
+              'AI_API_UNEXPECTED_ERROR',
+              'AI判定処理で予期しないエラーが発生しました。',
+            )
+            this.applyApiProgress(result, failed, true)
+            console.error('[ai-api] execution failed', {
+              projectId: result.projectId,
+              runId: result.runId,
+              code: 'AI_API_UNEXPECTED_ERROR',
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+            })
+            await this.event(result, 'ai_api_failed', { code: 'AI_API_UNEXPECTED_ERROR' })
+          }
+        }
       }
       result.status = 'completed'
       result.finishedAt = this.dependencies.now().toISOString()
@@ -184,6 +220,49 @@ export class RunEngine {
     } finally {
       await inspector?.close().catch(() => undefined)
     }
+  }
+
+  private async executeApiJudgment(project: Project, result: RunResult): Promise<void> {
+    const inputBundle = result.ai!.inputBundle!
+    const priceProfile = findMatchingAiPriceProfile(project.settings.ai.priceProfileId, project.settings.ai.model)
+    const runner = this.dependencies.aiApiRunner ?? runAiApiJudgment
+    const executed = priceProfile
+      ? await runner({
+          input: inputBundle,
+          model: project.settings.ai.model,
+          priceProfile,
+          costLimitUsd: project.settings.ai.costLimitUsd,
+          apiKey: (this.dependencies.openAiApiKey ?? (() => process.env.OPENAI_API_KEY))(),
+          onProgress: async progress => {
+            this.applyApiProgress(result, progress, false)
+            await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
+          },
+        })
+      : buildFailedAiApiResult(
+          inputBundle,
+          project.settings.ai.model,
+          project.settings.ai.costLimitUsd,
+          'AI_PRICE_PROFILE_MISSING',
+          '選択したモデルの料金プロファイルが設定されていません。',
+        )
+
+    this.applyApiProgress(result, executed, true)
+    await this.event(result, 'ai_api_completed', {
+      itemCount: executed.output.judgments.length,
+      failedCount: executed.failedCount,
+      stoppedByCostLimit: executed.usage.stoppedByCostLimit,
+    })
+  }
+
+  private applyApiProgress(result: RunResult, progress: AiApiExecutionResult, completed: boolean): void {
+    const completedAt = this.dependencies.now().toISOString()
+    result.ai!.apiResult = { output: progress.output, completedAt, failedCount: progress.failedCount }
+    result.ai!.status = completed
+      ? progress.terminalError ? 'api_failed' : 'completed'
+      : 'api_checking'
+    result.ai!.error = progress.terminalError
+    result.aiUsage = { enabled: true, ...progress.usage }
+    result.updatedAt = completedAt
   }
 
   private async worker(

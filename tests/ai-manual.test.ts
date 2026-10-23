@@ -211,6 +211,6 @@ function createRun(inputBundle: AiInputBundle): RunResult {
     summary: { ng: 0, needsReview: 0, unchecked: 0, excluded: 0, ok: 1 },
     pages: [], links: [], images: [], googleTagDetections: [],
     ai: { mode: 'manual', status: 'awaiting_manual', contractVersion: inputBundle.contractVersion, promptVersion: inputBundle.promptVersion, inputBundle },
-    aiUsage: { enabled: true, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, costLimitUsd: 1, stoppedByCostLimit: false },
+    aiUsage: { enabled: true, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, costLimitUsd: 1, stoppedByCostLimit: false, apiFailureCount: 0 },
   }
 }

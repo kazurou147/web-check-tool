@@ -47,6 +47,9 @@ function copyProjectSettings(settings: ProjectSettings): ProjectSettings {
     allowedPrivateHosts: [...(settings.allowedPrivateHosts ?? [])],
     ai: {
       mode: settings.ai?.mode ?? 'off',
+      model: settings.ai?.model ?? defaultProjectSettings().ai.model,
+      priceProfileId: settings.ai?.priceProfileId ?? defaultProjectSettings().ai.priceProfileId,
+      costLimitUsd: settings.ai?.costLimitUsd ?? defaultProjectSettings().ai.costLimitUsd,
     },
     auth: {
       mode: settings.auth.mode,
