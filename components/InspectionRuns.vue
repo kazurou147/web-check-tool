@@ -37,6 +37,7 @@ const runMessage = ref('')
 const runMessageKind = ref<'success' | 'error'>('success')
 const importingAi = ref(false)
 const downloadingAi = ref(false)
+const downloadingExcel = ref(false)
 const aiFileInput = ref<HTMLInputElement | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
@@ -129,6 +130,31 @@ async function downloadAiInput() {
     setRunMessage(caught instanceof Error ? caught.message : 'AI判定用JSONをダウンロードできませんでした。', 'error')
   } finally {
     downloadingAi.value = false
+  }
+}
+
+async function downloadExcelReport() {
+  if (!result.value || !selectedRunId.value || activeResult.value || downloadingExcel.value) return
+  downloadingExcel.value = true
+  setRunMessage('', 'success')
+  try {
+    await $fetch(`/api/projects/${props.projectId}/runs/${selectedRunId.value}/export/excel`, { method: 'POST' })
+    const response = await fetch(`/api/projects/${props.projectId}/runs/${selectedRunId.value}/export/excel`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({})) as { statusMessage?: string }
+      throw new Error(error.statusMessage ?? 'Excelレポートをダウンロードできませんでした。')
+    }
+    const url = URL.createObjectURL(await response.blob())
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `web-check-report-${selectedRunId.value}.xlsx`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    setRunMessage('Excelレポートを生成してダウンロードしました。', 'success')
+  } catch (caught) {
+    setRunMessage(getErrorMessage(caught), 'error')
+  } finally {
+    downloadingExcel.value = false
   }
 }
 
@@ -237,7 +263,8 @@ function setRunMessage(value: string, kind: 'success' | 'error') {
 }
 
 function getErrorMessage(caught: unknown): string {
-  return (caught as { data?: { statusMessage?: string } }).data?.statusMessage ?? '処理に失敗しました。'
+  return (caught as { data?: { statusMessage?: string } }).data?.statusMessage
+    ?? (caught instanceof Error ? caught.message : '処理に失敗しました。')
 }
 
 const statusLabels: Record<RunStatus, string> = {
@@ -355,6 +382,14 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
             <div class="run-times">
               <span>開始 {{ formatDate(result.startedAt) }}</span>
               <span>終了 {{ formatDate(result.finishedAt) }}</span>
+              <button
+                class="button"
+                type="button"
+                :disabled="activeResult || downloadingExcel"
+                @click="downloadExcelReport"
+              >
+                {{ downloadingExcel ? 'Excel生成中…' : 'Excelレポートをダウンロード' }}
+              </button>
             </div>
           </div>
 

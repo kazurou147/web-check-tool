@@ -6,6 +6,7 @@ import type { RunResult, RunSummary } from '~/shared/types/run'
 import { projectIdSchema } from './validation'
 
 export class RunNotFoundError extends Error {}
+export class RunReportNotFoundError extends Error {}
 
 export class RunStore {
   private readonly writeQueues = new Map<string, Promise<void>>()
@@ -16,6 +17,10 @@ export class RunStore {
     projectIdSchema.parse(projectId)
     projectIdSchema.parse(runId)
     return join(this.projectsDir, projectId, 'runs', runId)
+  }
+
+  reportPath(projectId: string, runId: string): string {
+    return join(this.runDir(projectId, runId), 'report.xlsx')
   }
 
   async create(projectId: string, runId: string, input: InputSnapshot, result: RunResult): Promise<void> {
@@ -60,6 +65,22 @@ export class RunStore {
   async appendEvent(projectId: string, runId: string, event: Record<string, unknown>): Promise<void> {
     const path = join(this.runDir(projectId, runId), 'events.jsonl')
     await appendFile(path, `${JSON.stringify(event)}\n`, { encoding: 'utf8' })
+  }
+
+  async saveReport(projectId: string, runId: string, bytes: Uint8Array): Promise<void> {
+    await this.get(projectId, runId)
+    const path = this.reportPath(projectId, runId)
+    await this.enqueue(path, () => atomicWriteBytes(path, bytes))
+  }
+
+  async readReport(projectId: string, runId: string): Promise<Buffer> {
+    await this.get(projectId, runId)
+    try {
+      return await readFile(this.reportPath(projectId, runId))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RunReportNotFoundError('Excelレポートがまだ生成されていません')
+      throw error
+    }
   }
 
   async get(projectId: string, runId: string): Promise<RunResult> {
@@ -169,5 +190,12 @@ async function atomicWrite(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
   await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' })
+  await rename(temporary, path)
+}
+
+async function atomicWriteBytes(path: string, bytes: Uint8Array): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
+  await writeFile(temporary, bytes, { flag: 'wx' })
   await rename(temporary, path)
 }
