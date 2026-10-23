@@ -141,11 +141,19 @@ describe('Phase 3実行基盤', () => {
 
     delete persisted.ai
     delete persisted.configSnapshot.aiMode
+    delete persisted.configSnapshot.mobileEmulation
+    delete persisted.configSnapshot.imageScrollStepViewportRatio
+    delete persisted.configSnapshot.imageScrollMaxCount
+    delete persisted.configSnapshot.imageScrollBottomStableCount
+    delete persisted.configSnapshot.imageScrollNoProgressCount
+    for (const page of persisted.pages) delete page.imageViewportDiagnostics
     delete persisted.aiUsage.cachedInputTokens
     delete persisted.aiUsage.apiFailureCount
     await writeFile(resultPath, `${JSON.stringify(persisted, null, 2)}\n`)
     const legacyLoaded = await runStore.get(project.projectId, result.runId)
     expect(legacyLoaded.configSnapshot.aiMode).toBe('off')
+    expect(legacyLoaded.configSnapshot.mobileEmulation).toBeUndefined()
+    expect(legacyLoaded.pages[0]?.imageViewportDiagnostics).toBeUndefined()
     expect(legacyLoaded.ai).toMatchObject({ mode: 'off', status: 'disabled' })
     expect(legacyLoaded.aiUsage).toMatchObject({ cachedInputTokens: 0, apiFailureCount: 0 })
 

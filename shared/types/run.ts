@@ -54,6 +54,7 @@ export interface PageResult {
   attempts: number
   httpStatus?: number
   findings: Finding[]
+  imageViewportDiagnostics?: ImageViewportDiagnostics[]
   error?: SafeError
 }
 
@@ -75,7 +76,17 @@ export interface GoogleTagDetection {
   sourceTagId?: string
   associationEvidence?: string[]
   location?: 'head' | 'body' | 'unknown'
+  gtmBodyPlacements?: GtmBodyPlacement[]
   occurrences: number
+}
+
+export type GtmBodyPlacementStatus = 'recommended' | 'acceptable_not_first' | 'too_far' | 'nested' | 'unresolved'
+
+export interface GtmBodyPlacement {
+  directBodyChild: boolean
+  elementPosition?: number
+  sourceCharacterDistance: number
+  status: GtmBodyPlacementStatus
 }
 
 export type LinkKind = 'http' | 'pdf' | 'anchor' | 'mailto' | 'tel' | 'non_http' | 'empty'
@@ -117,6 +128,36 @@ export interface ImageResult {
   }
 }
 
+export type ImageScrollStopReason = 'bottom_stable' | 'time_limit' | 'scroll_limit' | 'no_progress' | 'aborted'
+
+export interface ImageScrollDiagnostics {
+  stopReason: ImageScrollStopReason
+  scrollCount: number
+  elapsedMs: number
+  lastScrollY: number
+  lastDocumentHeight: number
+  viewportHeight: number
+  bottomStableCount: number
+  noProgressCount: number
+  reachedStableBottom: boolean
+}
+
+export interface ImageViewportDiagnostics {
+  device: ImageDevice
+  scroll?: ImageScrollDiagnostics
+  error?: string
+}
+
+export interface MobileEmulationSnapshot {
+  deviceProfile: 'Pixel 5'
+  userAgent: string
+  viewport: { width: 375; height: 667 }
+  screen: { width: 375; height: 667 }
+  deviceScaleFactor: number
+  isMobile: true
+  hasTouch: true
+}
+
 export interface SanitizedRunConfig {
   pageConcurrency: 1 | 2 | 3
   navigationTimeoutMs: number
@@ -126,6 +167,10 @@ export interface SanitizedRunConfig {
   linkTimeoutMs: number
   imageTimeoutMsPerDevice: number
   imageScrollWaitMs: number
+  imageScrollStepViewportRatio?: number
+  imageScrollMaxCount?: number
+  imageScrollBottomStableCount?: number
+  imageScrollNoProgressCount?: number
   authMode: AuthMode
   allowedPrivateHosts: string[]
   aiMode: 'off' | 'manual' | 'api'
@@ -133,6 +178,7 @@ export interface SanitizedRunConfig {
     desktop: { width: 1366; height: 768 }
     mobile: { width: 375; height: 667 }
   }
+  mobileEmulation?: MobileEmulationSnapshot
 }
 
 export interface RunResult {

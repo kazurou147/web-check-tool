@@ -92,31 +92,68 @@ describe('画像検査', () => {
     expect(result.exclusion).toBeUndefined()
   })
 
-  it('lazy loadingのため段階スクロールし、待機を2秒以下に制限する', async () => {
+  it('lazy loadingのため0.8 viewportずつ段階スクロールし、待機を1秒以下に制限する', async () => {
     let y = 0
     let now = 0
     const waits: number[] = []
-    const timedOut = await performProgressiveScroll({
+    const diagnostics = await performProgressiveScroll({
       state: async () => ({ y, height: 2_000, viewport: 500 }),
       scrollBy: async step => { y += step },
       wait: async milliseconds => { waits.push(milliseconds); now += milliseconds },
     }, 60_000, 5_000, () => now)
 
-    expect(timedOut).toBe(false)
+    expect(diagnostics.stopReason).toBe('bottom_stable')
+    expect(diagnostics.reachedStableBottom).toBe(true)
     expect(y).toBeGreaterThanOrEqual(1_500)
-    expect(Math.max(...waits)).toBe(2_000)
+    expect(Math.max(...waits)).toBe(1_000)
   })
 
   it('端末別の時間上限でスクロールを停止する', async () => {
     let now = 0
-    const timedOut = await performProgressiveScroll({
-      state: async () => ({ y: 0, height: 10_000, viewport: 500 }),
-      scrollBy: async () => undefined,
+    let y = 0
+    const diagnostics = await performProgressiveScroll({
+      state: async () => ({ y, height: 10_000, viewport: 500 }),
+      scrollBy: async step => { y += step },
       wait: async milliseconds => { now += milliseconds },
     }, 3_000, 2_000, () => now)
 
-    expect(timedOut).toBe(true)
+    expect(diagnostics.stopReason).toBe('time_limit')
     expect(now).toBe(3_000)
+  })
+
+  it('最大60回で停止し、未到達領域があることを診断値へ残す', async () => {
+    let y = 0
+    let now = 0
+    const diagnostics = await performProgressiveScroll({
+      state: async () => ({ y, height: 100_000, viewport: 500 }),
+      scrollBy: async step => { y += step },
+      wait: async milliseconds => { now += milliseconds },
+    }, 60_000, 10, () => now)
+
+    expect(diagnostics).toMatchObject({ stopReason: 'scroll_limit', scrollCount: 60, reachedStableBottom: false })
+  })
+
+  it('3回連続で進捗がなければ停止する', async () => {
+    let now = 0
+    const diagnostics = await performProgressiveScroll({
+      state: async () => ({ y: 0, height: 10_000, viewport: 500 }),
+      scrollBy: async () => undefined,
+      wait: async milliseconds => { now += milliseconds },
+    }, 60_000, 10, () => now)
+
+    expect(diagnostics).toMatchObject({ stopReason: 'no_progress', scrollCount: 3, noProgressCount: 3 })
+  })
+
+  it('AbortSignalを各反復で確認して停止理由を記録する', async () => {
+    const controller = new AbortController()
+    let y = 0
+    const diagnostics = await performProgressiveScroll({
+      state: async () => ({ y, height: 10_000, viewport: 500 }),
+      scrollBy: async step => { y += step; controller.abort() },
+      wait: async () => undefined,
+    }, 60_000, 1_000, () => 0, controller.signal)
+
+    expect(diagnostics).toMatchObject({ stopReason: 'aborted', scrollCount: 1, reachedStableBottom: false })
   })
 })
 

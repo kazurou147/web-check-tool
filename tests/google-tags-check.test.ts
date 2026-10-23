@@ -79,6 +79,42 @@ describe('Googleタグ検査', () => {
     expect(inspect({ rawHtml: duplicate, renderedHtml: duplicate, expected: [gtmHead, gtmBody] }).finding.verdict).toBe('ng')
   })
 
+  it.each([
+    [1, '', 'recommended'],
+    [2, '<div></div>', 'acceptable_not_first'],
+    [3, '<div></div><main></main>', 'acceptable_not_first'],
+  ] as const)('GTM bodyコードがbody直下%d番目なら正常範囲として位置を記録する', (position, prefix, status) => {
+    const html = `<html><head><script>GTM-ABC123</script></head><body>\n<!-- comment -->${prefix}<noscript>GTM-ABC123</noscript></body></html>`
+    const result = inspect({ rawHtml: html, renderedHtml: html, expected: [gtmHead, gtmBody] })
+    const detection = result.detections.find(item => item.id === 'GTM-ABC123' && item.detectionMethod === 'html_direct')
+
+    expect(result.finding.verdict).toBe('ok')
+    expect(detection?.gtmBodyPlacements).toEqual([expect.objectContaining({
+      directBodyChild: true,
+      elementPosition: position,
+      status,
+    })])
+    expect(detection?.evidence.join(' ')).toContain('body開始後の生文字距離=')
+  })
+
+  it('GTM bodyコードがbody直下4番目以降なら要確認にする', () => {
+    const html = '<html><head><script>GTM-ABC123</script></head><body><header></header><nav></nav><main></main><noscript>GTM-ABC123</noscript></body></html>'
+    const result = inspect({ rawHtml: html, renderedHtml: html, expected: [gtmHead, gtmBody] })
+
+    expect(result.finding.verdict).toBe('needs_review')
+    expect(result.finding.message).toContain('body直下の4番目')
+    expect(result.detections[0]?.gtmBodyPlacements?.[0]).toMatchObject({ elementPosition: 4, status: 'too_far' })
+  })
+
+  it('GTM bodyコードが別要素内にネストされていれば要確認にする', () => {
+    const html = '<html><head><script>GTM-ABC123</script></head><body><div><noscript>GTM-ABC123</noscript></div></body></html>'
+    const result = inspect({ rawHtml: html, renderedHtml: html, expected: [gtmHead, gtmBody] })
+
+    expect(result.finding.verdict).toBe('needs_review')
+    expect(result.finding.message).toContain('ネスト')
+    expect(result.detections[0]?.gtmBodyPlacements?.[0]).toMatchObject({ directBodyChild: false, status: 'nested' })
+  })
+
   it('DOMと通信の同一IDを不適切な重複と判定しない', () => {
     const html = '<html><head><script src="https://www.googletagmanager.com/gtag/js?id=G-DIRECT1"></script><script>gtag("config", "G-DIRECT1")</script></head><body></body></html>'
     const result = inspect({

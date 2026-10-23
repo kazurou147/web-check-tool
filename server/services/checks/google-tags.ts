@@ -1,6 +1,7 @@
 import type { ExpectedGoogleTag, GoogleTagIdType } from '~/shared/types/excel-input'
 import type {
   Finding,
+  GtmBodyPlacement,
   GoogleTagDetection,
   GoogleTagDetectionMethod,
   GoogleTagInstallationMethod,
@@ -33,7 +34,10 @@ interface HtmlInstallation {
   id: string
   location: 'head' | 'body' | 'unknown'
   role: 'loader' | 'config' | 'noscript' | 'other'
+  bodyPlacement?: GtmBodyPlacement
 }
+
+export const GTM_BODY_NORMAL_MAX_ELEMENT_POSITION = 3
 
 export function checkGoogleTags(input: GoogleTagCheckInput): GoogleTagCheckResult {
   const htmlInstallations = findHtmlInstallations(input.rawHtml)
@@ -65,6 +69,16 @@ export function checkGoogleTags(input: GoogleTagCheckInput): GoogleTagCheckResul
         }
         if (expected.placement === 'body' && !installations.some(item => item.location === 'body' && item.role === 'noscript')) {
           reasons.push({ verdict: 'needs_review', text: `${id} のbody用コードをbody内で確認できませんでした。` })
+        }
+      }
+      for (const installation of installations.filter(item => item.role === 'noscript')) {
+        const placement = installation.bodyPlacement
+        if (!placement || placement.status === 'unresolved') {
+          reasons.push({ verdict: 'needs_review', text: `${id} のbody用コード位置を確定できませんでした。` })
+        } else if (placement.status === 'nested') {
+          reasons.push({ verdict: 'needs_review', text: `${id} のbody用コードがbody直下ではなく別要素内にネストされています。` })
+        } else if (placement.status === 'too_far') {
+          reasons.push({ verdict: 'needs_review', text: `${id} のbody用コードはbody直下の${placement.elementPosition}番目で、正常範囲（先頭${GTM_BODY_NORMAL_MAX_ELEMENT_POSITION}要素以内）から外れています。` })
         }
       }
     }
@@ -135,12 +149,13 @@ export function checkGoogleTags(input: GoogleTagCheckInput): GoogleTagCheckResul
   }
 }
 
-function findHtmlInstallations(rawHtml: string): HtmlInstallation[] {
+export function findHtmlInstallations(rawHtml: string): HtmlInstallation[] {
   const html = decodeHtmlEntities(rawHtml)
   const lower = html.toLowerCase()
   const headEnd = lower.indexOf('</head>')
   const bodyStart = lower.indexOf('<body')
   const units: Array<{ text: string; index: number; tag: string }> = []
+  const bodyPlacements = analyzeGtmBodyPlacements(html)
   const tagPattern = /<(script|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>|<script\b[^>]*\/?>/gi
   for (const match of html.matchAll(tagPattern)) {
     units.push({ text: match[0], index: match.index, tag: match[1]?.toLowerCase() ?? 'script' })
@@ -157,7 +172,71 @@ function findHtmlInstallations(rawHtml: string): HtmlInstallation[] {
         : /(?:gtag\s*\(|dataLayer\.push|google_tag_manager)/i.test(unit.text)
           ? 'config' as const
           : 'other' as const,
+    ...(unit.tag === 'noscript' ? { bodyPlacement: bodyPlacements.get(unit.index) ?? unresolvedBodyPlacement(unit.index, html) } : {}),
   })))
+}
+
+function analyzeGtmBodyPlacements(html: string): Map<number, GtmBodyPlacement> {
+  const placements = new Map<number, GtmBodyPlacement>()
+  const body = /<body\b[^>]*>/i.exec(html)
+  if (!body || body.index === undefined) return placements
+  const bodyContentStart = body.index + body[0].length
+  const tokenPattern = /<!--[\s\S]*?-->|<![^>]*>|<\/?[A-Za-z][^>]*>/g
+  tokenPattern.lastIndex = bodyContentStart
+  const stack: string[] = []
+  let directElementPosition = 0
+  const voidElements = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'])
+  let match: RegExpExecArray | null
+  while ((match = tokenPattern.exec(html)) !== null) {
+    const token = match[0]
+    if (token.startsWith('<!--') || token.startsWith('<!')) continue
+    const closing = /^<\//.test(token)
+    const tag = /^<\/?\s*([A-Za-z][\w:-]*)/.exec(token)?.[1]?.toLowerCase()
+    if (!tag) continue
+    if (closing) {
+      if (tag === 'body') break
+      const index = stack.lastIndexOf(tag)
+      if (index >= 0) stack.splice(index)
+      continue
+    }
+    if (tag === 'body') continue
+    const directBodyChild = stack.length === 0
+    if (directBodyChild) directElementPosition += 1
+    if (tag === 'noscript') {
+      const sourceCharacterDistance = match.index - bodyContentStart
+      placements.set(match.index, {
+        directBodyChild,
+        ...(directBodyChild ? { elementPosition: directElementPosition } : {}),
+        sourceCharacterDistance,
+        status: !directBodyChild
+          ? 'nested'
+          : directElementPosition === 1
+            ? 'recommended'
+            : directElementPosition <= GTM_BODY_NORMAL_MAX_ELEMENT_POSITION
+              ? 'acceptable_not_first'
+              : 'too_far',
+      })
+    }
+    if ((tag === 'script' || tag === 'style') && !/\/\s*>$/.test(token)) {
+      const closingPattern = new RegExp(`<\\/${tag}\\s*>`, 'ig')
+      closingPattern.lastIndex = tokenPattern.lastIndex
+      const closingMatch = closingPattern.exec(html)
+      if (closingMatch) tokenPattern.lastIndex = closingPattern.lastIndex
+      continue
+    }
+    const selfClosing = /\/\s*>$/.test(token) || voidElements.has(tag)
+    if (!selfClosing) stack.push(tag)
+  }
+  return placements
+}
+
+function unresolvedBodyPlacement(index: number, html: string): GtmBodyPlacement {
+  const body = /<body\b[^>]*>/i.exec(html)
+  return {
+    directBodyChild: false,
+    sourceCharacterDistance: body?.index === undefined ? -1 : Math.max(0, index - (body.index + body[0].length)),
+    status: 'unresolved',
+  }
 }
 
 function buildDirectDetections(pageUrl: string, installations: HtmlInstallation[]): GoogleTagDetection[] {
@@ -174,6 +253,15 @@ function buildDirectDetections(pageUrl: string, installations: HtmlInstallation[
       installationCount(id, items),
     )
     detection.location = locations.length === 1 ? locations[0] : 'unknown'
+    if (id.startsWith('GTM-')) {
+      detection.gtmBodyPlacements = items
+        .filter(item => item.role === 'noscript' && item.bodyPlacement)
+        .map(item => item.bodyPlacement!)
+      for (const placement of detection.gtmBodyPlacements) {
+        const position = placement.elementPosition === undefined ? '' : `body直下${placement.elementPosition}番目、`
+        detection.evidence.push(`GTM body位置: ${position}状態=${placement.status}、body開始後の生文字距離=${placement.sourceCharacterDistance}`)
+      }
+    }
     return detection
   })
 }

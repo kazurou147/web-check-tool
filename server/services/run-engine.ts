@@ -36,6 +36,12 @@ import { readExcelInput } from './excel-input'
 import { NetworkPolicy } from './network-policy'
 import {
   createPlaywrightInspector,
+  IMAGE_SCROLL_BOTTOM_STABLE_COUNT,
+  IMAGE_SCROLL_MAX_COUNT,
+  IMAGE_SCROLL_NO_PROGRESS_COUNT,
+  IMAGE_SCROLL_STEP_VIEWPORT_RATIO,
+  IMAGE_SCROLL_WAIT_MAX_MS,
+  mobileEmulationSnapshot,
   PageInspectionError,
   type InspectorFactory,
   type PageInspection,
@@ -338,7 +344,12 @@ export class RunEngine {
       expected: input.expectedGoogleTags,
     })
     const links = await checkLinks(normalizedUrl, inspection.links, new Set(inspection.anchorTargets), probe, undefined, inspection.finalUrl)
-    const images = inspection.images.flatMap(viewport => checkImages(normalizedUrl, viewport.device, viewport.images, viewport.timedOut))
+    const images = inspection.images.flatMap(viewport => checkImages(
+      normalizedUrl,
+      viewport.device,
+      viewport.images,
+      viewport.timedOut || (viewport.scroll !== undefined && !viewport.scroll.reachedStableBottom),
+    ))
     const linkFinding = aggregateLinkFinding(normalizedUrl, pageNames, sourceRows, links)
     const imageFinding = aggregateImageFinding(normalizedUrl, pageNames, sourceRows, images, inspection)
     const page: PageResult = {
@@ -352,6 +363,11 @@ export class RunEngine {
       attempts: inspection.attempts,
       httpStatus: inspection.status,
       findings: [pageFetch, ...metadata, tags.finding, linkFinding, imageFinding],
+      imageViewportDiagnostics: inspection.images.map(viewport => ({
+        device: viewport.device,
+        ...(viewport.scroll ? { scroll: viewport.scroll } : {}),
+        ...(viewport.error ? { error: viewport.error } : {}),
+      })),
     }
     pageResultLinks.set(page, links)
     pageResultImages.set(page, images)
@@ -439,7 +455,11 @@ export function createRunConfig(settings: ProjectSettings): SanitizedRunConfig {
     maxResponseBytes: 10 * 1024 * 1024,
     linkTimeoutMs: 15_000,
     imageTimeoutMsPerDevice: 60_000,
-    imageScrollWaitMs: 1_000,
+    imageScrollWaitMs: IMAGE_SCROLL_WAIT_MAX_MS,
+    imageScrollStepViewportRatio: IMAGE_SCROLL_STEP_VIEWPORT_RATIO,
+    imageScrollMaxCount: IMAGE_SCROLL_MAX_COUNT,
+    imageScrollBottomStableCount: IMAGE_SCROLL_BOTTOM_STABLE_COUNT,
+    imageScrollNoProgressCount: IMAGE_SCROLL_NO_PROGRESS_COUNT,
     authMode: settings.auth.mode,
     allowedPrivateHosts: [...(settings.allowedPrivateHosts ?? [])],
     aiMode: settings.ai?.mode ?? 'off',
@@ -447,6 +467,7 @@ export function createRunConfig(settings: ProjectSettings): SanitizedRunConfig {
       desktop: { width: 1366, height: 768 },
       mobile: { width: 375, height: 667 },
     },
+    mobileEmulation: mobileEmulationSnapshot(),
   }
 }
 

@@ -1,6 +1,6 @@
-import { chromium, type Browser, type BrowserContext, type Page, type Request } from 'playwright'
+import { chromium, devices, type Browser, type BrowserContext, type BrowserContextOptions, type Page, type Request } from 'playwright'
 import type { ProjectSecrets, ProjectSettings } from '~/shared/types/project'
-import type { ImageDevice, SanitizedRunConfig } from '~/shared/types/run'
+import type { ImageDevice, ImageScrollDiagnostics, MobileEmulationSnapshot, SanitizedRunConfig } from '~/shared/types/run'
 import type { CapturedImage } from './checks/images'
 import type { CapturedLink, HttpProbeResult, LinkProbe } from './checks/links'
 import type { RenderedMetadata } from './checks/metadata'
@@ -11,7 +11,48 @@ export interface ImageViewportInspection {
   device: ImageDevice
   images: CapturedImage[]
   timedOut: boolean
+  scroll?: ImageScrollDiagnostics
   error?: string
+}
+
+export const MOBILE_DEVICE_PROFILE_NAME = 'Pixel 5' as const
+export const IMAGE_SCROLL_STEP_VIEWPORT_RATIO = 0.8
+export const IMAGE_SCROLL_WAIT_MAX_MS = 1_000
+export const IMAGE_SCROLL_MAX_COUNT = 60
+export const IMAGE_SCROLL_BOTTOM_STABLE_COUNT = 2
+export const IMAGE_SCROLL_NO_PROGRESS_COUNT = 3
+
+export function mobileEmulationSnapshot(): MobileEmulationSnapshot {
+  const profile = devices[MOBILE_DEVICE_PROFILE_NAME]
+  return {
+    deviceProfile: MOBILE_DEVICE_PROFILE_NAME,
+    userAgent: profile.userAgent,
+    viewport: { width: 375, height: 667 },
+    screen: { width: 375, height: 667 },
+    deviceScaleFactor: profile.deviceScaleFactor,
+    isMobile: true,
+    hasTouch: true,
+  }
+}
+
+export function createMobileContextOptions(
+  config: SanitizedRunConfig,
+  httpCredentials?: { username: string; password: string },
+  storageState?: BrowserContextOptions['storageState'],
+): BrowserContextOptions {
+  const mobile = config.mobileEmulation ?? mobileEmulationSnapshot()
+  return {
+    acceptDownloads: false,
+    serviceWorkers: 'block',
+    httpCredentials,
+    storageState,
+    userAgent: mobile.userAgent,
+    viewport: mobile.viewport,
+    screen: mobile.screen,
+    deviceScaleFactor: mobile.deviceScaleFactor,
+    isMobile: mobile.isMobile,
+    hasTouch: mobile.hasTouch,
+  }
 }
 
 export interface PageInspection {
@@ -67,6 +108,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
   private constructor(
     private readonly browser: Browser,
     private readonly context: BrowserContext,
+    private mobileContext: BrowserContext,
     private readonly settings: ProjectSettings,
     private readonly secrets: ProjectSecrets,
     private readonly config: SanitizedRunConfig,
@@ -78,25 +120,20 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
 
   static async create(settings: ProjectSettings, secrets: ProjectSecrets, config: SanitizedRunConfig): Promise<PlaywrightWebsiteInspector> {
     const browser = await chromium.launch({ headless: true })
+    const httpCredentials = settings.auth.mode === 'basic' && secrets.basic
+      ? { username: secrets.basic.username, password: secrets.basic.password }
+      : undefined
     const context = await browser.newContext({
       acceptDownloads: false,
       serviceWorkers: 'block',
-      httpCredentials: settings.auth.mode === 'basic' && secrets.basic
-        ? { username: secrets.basic.username, password: secrets.basic.password }
-        : undefined,
+      httpCredentials,
       viewport: config.viewports.desktop,
     })
+    const mobileContext = await browser.newContext(createMobileContextOptions(config, httpCredentials))
     const policy = new NetworkPolicy({ allowedPrivateHosts: settings.allowedPrivateHosts })
-    const inspector = new PlaywrightWebsiteInspector(browser, context, settings, secrets, config, policy)
-    await context.route('**/*', async (route) => {
-      const request = route.request()
-      try {
-        await inspector.assertRequestAllowed(request)
-        await route.continue()
-      } catch {
-        await route.abort('blockedbyclient')
-      }
-    })
+    const inspector = new PlaywrightWebsiteInspector(browser, context, mobileContext, settings, secrets, config, policy)
+    await inspector.installProtectedRoute(context)
+    await inspector.installProtectedRoute(mobileContext)
     return inspector
   }
 
@@ -120,6 +157,10 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       if (this.settings.auth.successUrlPattern && !matchesUrlPattern(page.url(), this.settings.auth.successUrlPattern)) {
         throw new PageInspectionError('フォーム認証の成功URL条件を満たしませんでした。', 'AUTH_FAILED', false, 1)
       }
+      const storageState = await this.context.storageState()
+      await this.mobileContext.close()
+      this.mobileContext = await this.browser.newContext(createMobileContextOptions(this.config, undefined, storageState))
+      await this.installProtectedRoute(this.mobileContext)
     } catch (error) {
       if (error instanceof PageInspectionError) throw error
       throw new PageInspectionError('フォーム認証に失敗しました。', 'AUTH_FAILED', false, 1)
@@ -139,6 +180,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
   }
 
   async close(): Promise<void> {
+    await this.mobileContext.close().catch(() => undefined)
     await this.context.close().catch(() => undefined)
     await this.browser.close().catch(() => undefined)
   }
@@ -220,7 +262,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
 
   private async inspectMobileImages(url: string, signal?: AbortSignal): Promise<ImageViewportInspection> {
     const startedAt = Date.now()
-    const page = await this.context.newPage()
+    const page = await this.mobileContext.newPage()
     const failures = new Map<string, string>()
     const successes = new Set<string>()
     page.on('requestfailed', request => {
@@ -235,7 +277,6 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       }
     })
     try {
-      await page.setViewportSize(this.config.viewports.mobile)
       const response = await page.goto(url, {
         waitUntil: 'domcontentloaded',
         timeout: Math.min(this.config.navigationTimeoutMs, this.config.imageTimeoutMsPerDevice),
@@ -244,7 +285,12 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         return { device: 'mobile', images: [], timedOut: false, error: response ? `HTTP ${response.status()}` : '応答なし' }
       }
       const remaining = this.config.imageTimeoutMsPerDevice - (Date.now() - startedAt)
-      if (remaining <= 0) return { device: 'mobile', images: [], timedOut: true }
+      if (remaining <= 0) return {
+        device: 'mobile',
+        images: [],
+        timedOut: true,
+        scroll: emptyScrollDiagnostics('time_limit', Date.now() - startedAt),
+      }
       return await this.inspectImagesOnLoadedPage(page, 'mobile', failures, successes, signal, remaining)
     } catch (error) {
       return { device: 'mobile', images: [], timedOut: false, error: safeErrorMessage(error) }
@@ -261,11 +307,16 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
     signal?: AbortSignal,
     timeoutMs = this.config.imageTimeoutMsPerDevice,
   ): Promise<ImageViewportInspection> {
-    const timedOut = await performProgressiveScroll({
+    const scroll = await performProgressiveScroll({
       state: () => page.evaluate(() => ({ y: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight })),
       scrollBy: step => page.evaluate(value => window.scrollBy(0, value), step),
       wait: milliseconds => page.waitForTimeout(milliseconds),
-    }, timeoutMs, this.config.imageScrollWaitMs, () => Date.now(), signal)
+    }, timeoutMs, this.config.imageScrollWaitMs, () => Date.now(), signal, {
+      stepViewportRatio: this.config.imageScrollStepViewportRatio,
+      maxScrollCount: this.config.imageScrollMaxCount,
+      bottomStableCount: this.config.imageScrollBottomStableCount,
+      noProgressCount: this.config.imageScrollNoProgressCount,
+    })
     const captured = await captureImages(page)
     for (const image of captured) {
       const failure = failures.get(image.imageUrl)
@@ -276,7 +327,19 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         image.decoded = true
       }
     }
-    return { device, images: captured, timedOut }
+    return { device, images: captured, timedOut: scroll.stopReason === 'time_limit', scroll }
+  }
+
+  private async installProtectedRoute(context: BrowserContext): Promise<void> {
+    await context.route('**/*', async (route) => {
+      const request = route.request()
+      try {
+        await this.assertRequestAllowed(request)
+        await route.continue()
+      } catch {
+        await route.abort('blockedbyclient')
+      }
+    })
   }
 
   private async assertRequestAllowed(request: Request): Promise<void> {
@@ -366,19 +429,80 @@ export async function performProgressiveScroll(
   waitMs: number,
   now: () => number = () => Date.now(),
   signal?: AbortSignal,
-): Promise<boolean> {
-  const deadline = now() + timeoutMs
-  let previousHeight = 0
+  options: {
+    stepViewportRatio?: number
+    maxScrollCount?: number
+    bottomStableCount?: number
+    noProgressCount?: number
+  } = {},
+): Promise<ImageScrollDiagnostics> {
+  const startedAt = now()
+  const deadline = startedAt + timeoutMs
+  const stepViewportRatio = options.stepViewportRatio ?? IMAGE_SCROLL_STEP_VIEWPORT_RATIO
+  const maxScrollCount = options.maxScrollCount ?? IMAGE_SCROLL_MAX_COUNT
+  const requiredBottomStableCount = options.bottomStableCount ?? IMAGE_SCROLL_BOTTOM_STABLE_COUNT
+  const requiredNoProgressCount = options.noProgressCount ?? IMAGE_SCROLL_NO_PROGRESS_COUNT
+  let previousState: { y: number; height: number; viewport: number } | undefined
+  let scrollCount = 0
+  let bottomStableCount = 0
+  let noProgressCount = 0
   while (true) {
-    if (signal?.aborted) return false
+    if (signal?.aborted) return diagnostics('aborted', previousState, false)
     const state = await driver.state()
-    if (now() >= deadline) return true
-    if (state.y + state.viewport >= state.height && state.height === previousHeight) return false
-    previousHeight = state.height
-    await driver.scrollBy(Math.max(1, Math.floor(state.viewport * 0.8)))
+    const atBottom = state.y + state.viewport >= state.height
+    if (atBottom) {
+      bottomStableCount = previousState && previousState.height === state.height && previousState.y + previousState.viewport >= previousState.height
+        ? bottomStableCount + 1
+        : 1
+    } else {
+      bottomStableCount = 0
+    }
+    if (bottomStableCount >= requiredBottomStableCount) return diagnostics('bottom_stable', state, true)
+    if (previousState && state.y <= previousState.y && !atBottom) noProgressCount += 1
+    else noProgressCount = 0
+    if (noProgressCount >= requiredNoProgressCount) return diagnostics('no_progress', state, false)
+    if (now() >= deadline) return diagnostics('time_limit', state, false)
+    if (scrollCount >= maxScrollCount) return diagnostics('scroll_limit', state, false)
+    previousState = state
+    await driver.scrollBy(Math.max(1, Math.floor(state.viewport * stepViewportRatio)))
+    scrollCount += 1
+    if (signal?.aborted) return diagnostics('aborted', state, false)
     const remaining = deadline - now()
-    if (remaining <= 0) return true
-    await driver.wait(Math.min(waitMs, 2_000, remaining))
+    if (remaining <= 0) return diagnostics('time_limit', state, false)
+    await driver.wait(Math.min(waitMs, IMAGE_SCROLL_WAIT_MAX_MS, remaining))
+  }
+
+
+  function diagnostics(
+    stopReason: ImageScrollDiagnostics['stopReason'],
+    state: { y: number; height: number; viewport: number } | undefined,
+    reachedStableBottom: boolean,
+  ): ImageScrollDiagnostics {
+    return {
+      stopReason,
+      scrollCount,
+      elapsedMs: Math.max(0, now() - startedAt),
+      lastScrollY: state?.y ?? 0,
+      lastDocumentHeight: state?.height ?? 0,
+      viewportHeight: state?.viewport ?? 0,
+      bottomStableCount,
+      noProgressCount,
+      reachedStableBottom,
+    }
+  }
+}
+
+function emptyScrollDiagnostics(stopReason: ImageScrollDiagnostics['stopReason'], elapsedMs: number): ImageScrollDiagnostics {
+  return {
+    stopReason,
+    scrollCount: 0,
+    elapsedMs: Math.max(0, elapsedMs),
+    lastScrollY: 0,
+    lastDocumentHeight: 0,
+    viewportHeight: 0,
+    bottomStableCount: 0,
+    noProgressCount: 0,
+    reachedStableBottom: false,
   }
 }
 
