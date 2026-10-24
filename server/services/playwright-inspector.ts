@@ -6,6 +6,7 @@ import type { CapturedLink, HttpProbeResult, LinkProbe } from './checks/links'
 import type { RenderedMetadata } from './checks/metadata'
 import type { TagNetworkObservation } from './checks/google-tags'
 import { NetworkPolicy, NetworkPolicyError } from './network-policy'
+import { isAbortError, RunCanceledError, throwIfAborted } from './abort'
 
 export interface ImageViewportInspection {
   device: ImageDevice
@@ -71,7 +72,7 @@ export interface PageInspection {
 
 export interface WebsiteInspector {
   readonly linkProbe?: LinkProbe
-  authenticate(): Promise<void>
+  authenticate(signal?: AbortSignal): Promise<void>
   inspect(url: string, signal?: AbortSignal): Promise<PageInspection>
   close(): Promise<void>
 }
@@ -137,7 +138,8 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
     return inspector
   }
 
-  async authenticate(): Promise<void> {
+  async authenticate(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal)
     if (this.settings.auth.mode !== 'form') return
     const credentials = this.secrets.form
     if (!credentials) throw new PageInspectionError('フォーム認証情報が設定されていません。', 'AUTH_MISSING', false, 0)
@@ -149,19 +151,24 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         waitUntil: 'domcontentloaded',
         timeout: this.config.navigationTimeoutMs,
       })
+      throwIfAborted(signal)
       if (!response || response.status() >= 400) throw new Error('ログインページを取得できません')
       await page.locator(this.settings.auth.usernameSelector).fill(credentials.username)
       await page.locator(this.settings.auth.passwordSelector).fill(credentials.password)
       await page.locator(this.settings.auth.submitSelector).click()
+      throwIfAborted(signal)
       await page.waitForLoadState('domcontentloaded', { timeout: this.config.navigationTimeoutMs }).catch(() => undefined)
       if (this.settings.auth.successUrlPattern && !matchesUrlPattern(page.url(), this.settings.auth.successUrlPattern)) {
         throw new PageInspectionError('フォーム認証の成功URL条件を満たしませんでした。', 'AUTH_FAILED', false, 1)
       }
       const storageState = await this.context.storageState()
+      throwIfAborted(signal)
       await this.mobileContext.close()
+      throwIfAborted(signal)
       this.mobileContext = await this.browser.newContext(createMobileContextOptions(this.config, undefined, storageState))
       await this.installProtectedRoute(this.mobileContext)
     } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
       if (error instanceof PageInspectionError) throw error
       throw new PageInspectionError('フォーム認証に失敗しました。', 'AUTH_FAILED', false, 1)
     } finally {
@@ -186,6 +193,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
   }
 
   private async inspectAttempt(url: string, attempt: number, signal?: AbortSignal): Promise<PageInspection> {
+    throwIfAborted(signal)
     await this.policy.assertUrl(url)
     const page = await this.context.newPage()
     await page.setViewportSize(this.config.viewports.desktop)
@@ -216,6 +224,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         waitUntil: 'domcontentloaded',
         timeout: this.config.navigationTimeoutMs,
       })
+      throwIfAborted(signal)
       if (!response) throw new PageInspectionError('ページの応答を取得できませんでした。', 'NO_RESPONSE', true, attempt)
       const status = response.status()
       if (status === 429 || status >= 500) {
@@ -240,7 +249,9 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         .flatMap(element => [element.id, element.getAttribute('name') ?? ''])
         .filter(Boolean))
       const desktopImages = await this.inspectImagesOnLoadedPage(page, 'desktop', imageFailures, imageSuccesses, signal)
+      throwIfAborted(signal)
       const mobileImages = await this.inspectMobileImages(url, signal)
+      throwIfAborted(signal)
       return {
         requestedUrl: url,
         finalUrl: page.url(),
@@ -261,6 +272,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
   }
 
   private async inspectMobileImages(url: string, signal?: AbortSignal): Promise<ImageViewportInspection> {
+    throwIfAborted(signal)
     const startedAt = Date.now()
     const page = await this.mobileContext.newPage()
     const failures = new Map<string, string>()
@@ -281,6 +293,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         waitUntil: 'domcontentloaded',
         timeout: Math.min(this.config.navigationTimeoutMs, this.config.imageTimeoutMsPerDevice),
       })
+      throwIfAborted(signal)
       if (!response || response.status() >= 400) {
         return { device: 'mobile', images: [], timedOut: false, error: response ? `HTTP ${response.status()}` : '応答なし' }
       }
@@ -293,6 +306,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       }
       return await this.inspectImagesOnLoadedPage(page, 'mobile', failures, successes, signal, remaining)
     } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
       return { device: 'mobile', images: [], timedOut: false, error: safeErrorMessage(error) }
     } finally {
       await page.close()
@@ -317,7 +331,9 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       bottomStableCount: this.config.imageScrollBottomStableCount,
       noProgressCount: this.config.imageScrollNoProgressCount,
     })
+    throwIfAborted(signal)
     const captured = await captureImages(page)
+    throwIfAborted(signal)
     for (const image of captured) {
       const failure = failures.get(image.imageUrl)
       if (failure) image.networkError = failure
@@ -371,7 +387,7 @@ class ContextLinkProbe implements LinkProbe {
     let current = value
     let redirectCount = 0
     while (true) {
-      if (signal?.aborted) throw new Error('リンク検査が中止されました')
+      throwIfAborted(signal)
       await this.policy.assertUrl(current)
       const response = await this.context.request.fetch(current, {
         method: includeBody ? 'GET' : 'HEAD',
@@ -514,10 +530,11 @@ export async function withPageRetries<T>(
 ): Promise<T> {
   let lastError: unknown
   for (let attempt = 1; attempt <= retryCount + 1; attempt += 1) {
-    if (signal?.aborted) throw new PageInspectionError('検査が中止されました。', 'ABORTED', false, attempt - 1)
+    throwIfAborted(signal)
     try {
       return await operation(attempt)
     } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
       lastError = error
       const normalized = normalize(error, attempt)
       if (!normalized.retryable || attempt > retryCount) throw normalized

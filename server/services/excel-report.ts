@@ -556,6 +556,8 @@ function aiStatusLabel(status: NonNullable<RunResult['ai']>['status']): string {
     api_checking: 'API判定中',
     api_failed: 'API判定失敗',
     completed: '判定完了',
+    canceled: 'キャンセル済み',
+    interrupted: '異常終了による中断',
     preparation_failed: '入力準備失敗',
   } as const)[status]
 }

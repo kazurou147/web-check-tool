@@ -14,6 +14,16 @@ export type RunStatus =
   | 'canceled'
   | 'interrupted'
 
+export type ActiveRunStatus = 'queued' | 'reading_input' | 'authenticating' | 'checking' | 'ai_checking'
+
+export interface RunTermination {
+  kind: 'canceled' | 'interrupted'
+  reasonCode: 'USER_REQUESTED' | 'PROCESS_RESTART'
+  previousStatus: ActiveRunStatus
+  requestedAt?: string
+  finalizedAt?: string
+}
+
 export type FindingItem =
   | 'page_fetch'
   | 'title'
@@ -209,6 +219,7 @@ export interface RunResult {
     stoppedByCostLimit: boolean
     apiFailureCount: number
   }
+  termination?: RunTermination
   fatalError?: SafeError
 }
 
@@ -222,5 +233,6 @@ export interface RunSummary {
   totalPages: number
   completedPages: number
   summary: RunResult['summary']
+  termination?: RunTermination
   fatalError?: SafeError
 }

@@ -7,6 +7,7 @@ import type {
   AiPriceProfile,
 } from '~/shared/types/ai'
 import { buildAiQualityInstructions } from '~/shared/utils/manual-ai'
+import { abortableDelay, isAbortError, RunCanceledError, throwIfAborted } from './abort'
 
 export const AI_API_BATCH_SIZE = 8
 export const AI_API_MAX_OUTPUT_TOKENS = 4_096
@@ -49,6 +50,7 @@ export interface AiApiTransportRequest {
   instructions: string
   input: string
   maxOutputTokens: number
+  signal?: AbortSignal
 }
 
 export interface AiApiTransportResponse {
@@ -90,6 +92,7 @@ export interface RunAiApiOptions {
   transport?: AiApiTransport
   sleep?: (milliseconds: number) => Promise<void>
   onProgress?: (result: AiApiExecutionResult) => Promise<void>
+  signal?: AbortSignal
 }
 
 export async function runAiApiJudgment(options: RunAiApiOptions): Promise<AiApiExecutionResult> {
@@ -104,18 +107,21 @@ export async function runAiApiJudgment(options: RunAiApiOptions): Promise<AiApiE
     apiFailureCount: 0,
   }
   const instructions = buildAiQualityInstructions()
-  const sleep = options.sleep ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)))
+  const sleep = options.sleep ?? (milliseconds => abortableDelay(milliseconds, options.signal))
   let retryBudgetReserve = 0
   let terminalError: AiApiExecutionResult['terminalError']
   let transport: AiApiTransport
   try {
+    throwIfAborted(options.signal)
     transport = options.transport ?? createOpenAiTransport(requireApiKey(options.apiKey))
   } catch (error) {
+    if (isAbortError(error) || options.signal?.aborted) throw new RunCanceledError()
     const failure = classifyAiApiError(error)
     return buildFailedAiApiResult(options.input, options.model, options.costLimitUsd, failure.code, failure.message)
   }
 
   for (let offset = 0; offset < options.input.items.length; offset += AI_API_BATCH_SIZE) {
+    throwIfAborted(options.signal)
     const batch = options.input.items.slice(offset, offset + AI_API_BATCH_SIZE)
     const input = JSON.stringify({ contentTreatment: options.input.contentTreatment, items: batch })
     const predictedCost = calculateAiCost({
@@ -133,7 +139,9 @@ export async function runAiApiJudgment(options: RunAiApiOptions): Promise<AiApiE
     let batchCompleted = false
     for (let attempt = 0; attempt <= AI_API_MAX_RETRIES; attempt += 1) {
       try {
-        const response = await transport({ model: options.model, instructions, input, maxOutputTokens: AI_API_MAX_OUTPUT_TOKENS })
+        throwIfAborted(options.signal)
+        const response = await transport({ model: options.model, instructions, input, maxOutputTokens: AI_API_MAX_OUTPUT_TOKENS, signal: options.signal })
+        throwIfAborted(options.signal)
         addUsage(usage, response.usage, options.priceProfile)
         if (response.refusal) throw new AiApiFailure('AI_API_REFUSAL', 'モデルが判定を拒否しました。', false, false)
         if (response.status !== 'completed') throw new AiApiFailure('AI_API_INCOMPLETE', 'API応答が完了しませんでした。', false, false)
@@ -142,6 +150,7 @@ export async function runAiApiJudgment(options: RunAiApiOptions): Promise<AiApiE
         batchCompleted = true
         break
       } catch (error) {
+        if (isAbortError(error) || options.signal?.aborted) throw new RunCanceledError()
         const failure = classifyAiApiError(error)
         if (failure.retryable && attempt < AI_API_MAX_RETRIES) {
           retryBudgetReserve += predictedCost
@@ -153,6 +162,7 @@ export async function runAiApiJudgment(options: RunAiApiOptions): Promise<AiApiE
             break
           }
           await sleep(attempt === 0 ? 500 : 1_500)
+          throwIfAborted(options.signal)
           continue
         }
 
@@ -170,6 +180,7 @@ export async function runAiApiJudgment(options: RunAiApiOptions): Promise<AiApiE
     }
 
     const progress = buildResult(options, judgments, usage, terminalError)
+    throwIfAborted(options.signal)
     await options.onProgress?.(progress)
     if (!batchCompleted || terminalError || usage.stoppedByCostLimit) break
   }
@@ -232,7 +243,7 @@ export function createOpenAiTransport(apiKey: string): AiApiTransport {
           schema: AI_API_JSON_SCHEMA,
         },
       },
-    })
+    }, { signal: request.signal })
     const refusal = response.output
       .flatMap(item => item.type === 'message' ? item.content : [])
       .find(content => content.type === 'refusal')

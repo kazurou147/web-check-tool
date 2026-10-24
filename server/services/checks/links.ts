@@ -1,5 +1,6 @@
 import type { LinkKind, LinkResult, Verdict } from '~/shared/types/run'
 import { NetworkPolicy, NetworkPolicyError } from '../network-policy'
+import { isAbortError, RunCanceledError, throwIfAborted } from '../abort'
 
 export interface CapturedLink {
   href: string
@@ -41,6 +42,7 @@ export class SafeLinkProbe implements LinkProbe {
     let redirectCount = 0
     let method: 'HEAD' | 'GET' = includeBody ? 'GET' : 'HEAD'
     while (true) {
+      throwIfAborted(signal)
       await this.policy.assertUrl(current)
       const timeout = AbortSignal.timeout(this.options.timeoutMs)
       const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
@@ -112,6 +114,7 @@ export async function checkLinks(
       return result(base, 'non_http', 'needs_review', '通信しないリンク形式として記録しました。')
     }
 
+    throwIfAborted(signal)
     let target: URL
     try {
       target = new URL(link.resolvedUrl || link.href, pageUrl)
@@ -173,6 +176,7 @@ export async function checkLinks(
         evidence,
       }
     } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
       const message = error instanceof NetworkPolicyError
         ? error.message
         : error instanceof DOMException && error.name === 'TimeoutError'

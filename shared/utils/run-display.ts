@@ -12,6 +12,10 @@ export function isActiveRun(status: RunStatus): boolean {
   return activeRunStatuses.includes(status)
 }
 
+export function canCancelRun(status: RunStatus, canceling: boolean): boolean {
+  return isActiveRun(status) && !canceling
+}
+
 export function runProgress(result: RunResult): { completed: number; total: number; percent: number } {
   const total = result.input.uniqueUrlCount
   const completed = Math.min(result.pages.length, total)

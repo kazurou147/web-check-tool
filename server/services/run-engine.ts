@@ -4,6 +4,7 @@ import type { Project, ProjectSecrets, ProjectSettings } from '~/shared/types/pr
 import type { AiInputBundle } from '~/shared/types/ai'
 import { findMatchingAiPriceProfile } from '~/shared/config/ai-pricing'
 import type {
+  ActiveRunStatus,
   Finding,
   ImageResult,
   LinkResult,
@@ -13,6 +14,8 @@ import type {
   SanitizedRunConfig,
   Verdict,
 } from '~/shared/types/run'
+import { isActiveRun } from '~/shared/utils/run-display'
+import { isAbortError, RunCanceledError, throwIfAborted } from './abort'
 import { checkGoogleTags } from './checks/google-tags'
 import { checkImages } from './checks/images'
 import { checkLinks, SafeLinkProbe, type LinkProbe } from './checks/links'
@@ -52,6 +55,7 @@ import { RunStore } from './run-store'
 
 export class RunBusyError extends Error {}
 export class RunInputError extends Error {}
+export class RunCancelConflictError extends Error {}
 
 export type LinkProbeFactory = (settings: ProjectSettings, config: SanitizedRunConfig) => LinkProbe
 
@@ -120,23 +124,34 @@ export class RunEngine {
     return { project, secrets, input, result }
   }
 
-  async execute(prepared: PreparedRun): Promise<RunResult> {
+  async execute(prepared: PreparedRun, signal?: AbortSignal): Promise<RunResult> {
     const { project, secrets, input, result } = prepared
     let inspector: WebsiteInspector | undefined
+    let abortInspector: (() => void) | undefined
     try {
-      await this.transition(result, 'reading_input')
-      await this.transition(result, 'authenticating', true)
+      throwIfAborted(signal)
+      await this.transition(result, 'reading_input', false, signal)
+      await this.transition(result, 'authenticating', true, signal)
       inspector = await this.dependencies.inspectorFactory({ settings: project.settings, secrets, config: result.configSnapshot })
-      await inspector.authenticate()
-      await this.transition(result, 'checking')
+      abortInspector = () => { void inspector?.close() }
+      signal?.addEventListener('abort', abortInspector, { once: true })
+      throwIfAborted(signal)
+      await inspector.authenticate(signal)
+      await this.transition(result, 'checking', false, signal)
       const groups = groupRows(input.pageRows)
       const queue = [...groups.entries()]
       const workerCount = Math.min(project.settings.pageConcurrency, queue.length)
       const probe = inspector.linkProbe ?? this.dependencies.linkProbeFactory(project.settings, result.configSnapshot)
       const aiCandidates: AiSourceCandidate[] = []
-      await Promise.all(Array.from({ length: workerCount }, () => this.worker(queue, input, result, inspector!, probe, aiCandidates)))
+      const workers = await Promise.allSettled(Array.from(
+        { length: workerCount },
+        () => this.worker(queue, input, result, inspector!, probe, aiCandidates, signal),
+      ))
+      const rejected = workers.find((worker): worker is PromiseRejectedResult => worker.status === 'rejected')
+      if (rejected) throw rejected.reason
+      throwIfAborted(signal)
       if (project.settings.ai.mode !== 'off') {
-        await this.transition(result, 'ai_checking')
+        await this.transition(result, 'ai_checking', false, signal)
         let preparationStage: 'signing_key' | 'bundle_generation' = 'signing_key'
         let inputPrepared = false
         try {
@@ -152,6 +167,7 @@ export class RunEngine {
             probe,
             signingKey,
             now: this.dependencies.now,
+            signal,
           })
           result.ai!.status = result.ai!.inputBundle.items.length === 0
             ? 'no_targets'
@@ -159,6 +175,7 @@ export class RunEngine {
           await this.event(result, 'ai_input_ready', { itemCount: result.ai!.inputBundle.items.length })
           inputPrepared = true
         } catch (error) {
+          if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
           const diagnostic = aiPreparationDiagnostic(preparationStage)
           result.ai!.status = 'preparation_failed'
           result.ai!.error = {
@@ -187,8 +204,9 @@ export class RunEngine {
         }
         if (inputPrepared && project.settings.ai.mode === 'api' && result.ai!.inputBundle!.items.length) {
           try {
-            await this.executeApiJudgment(project, result)
+            await this.executeApiJudgment(project, result, signal)
           } catch (error) {
+            if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
             const failed = buildFailedAiApiResult(
               result.ai!.inputBundle!,
               project.settings.ai.model,
@@ -207,6 +225,7 @@ export class RunEngine {
           }
         }
       }
+      throwIfAborted(signal)
       result.status = 'completed'
       result.finishedAt = this.dependencies.now().toISOString()
       result.updatedAt = result.finishedAt
@@ -215,6 +234,25 @@ export class RunEngine {
       await this.event(result, 'run_completed')
       return result
     } catch (error) {
+      if (isAbortError(error) || signal?.aborted) {
+        const finalizedAt = this.dependencies.now().toISOString()
+        const previousStatus = isActiveRun(result.status) ? result.status as ActiveRunStatus : 'checking'
+        result.status = 'canceled'
+        result.finishedAt = finalizedAt
+        result.updatedAt = finalizedAt
+        result.termination = {
+          kind: 'canceled',
+          reasonCode: 'USER_REQUESTED',
+          previousStatus,
+          requestedAt: result.termination?.requestedAt ?? finalizedAt,
+          finalizedAt,
+        }
+        if (result.ai?.status === 'preparing' || result.ai?.status === 'api_checking') result.ai.status = 'canceled'
+        result.summary = summarize(result)
+        await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
+        await this.event(result, 'run_canceled', { previousStatus, reasonCode: 'USER_REQUESTED' })
+        return result
+      }
       result.status = 'failed'
       result.finishedAt = this.dependencies.now().toISOString()
       result.updatedAt = result.finishedAt
@@ -224,11 +262,12 @@ export class RunEngine {
       await this.event(result, 'run_failed', { code: result.fatalError.code })
       return result
     } finally {
+      if (abortInspector) signal?.removeEventListener('abort', abortInspector)
       await inspector?.close().catch(() => undefined)
     }
   }
 
-  private async executeApiJudgment(project: Project, result: RunResult): Promise<void> {
+  private async executeApiJudgment(project: Project, result: RunResult, signal?: AbortSignal): Promise<void> {
     const inputBundle = result.ai!.inputBundle!
     const priceProfile = findMatchingAiPriceProfile(project.settings.ai.priceProfileId, project.settings.ai.model)
     const runner = this.dependencies.aiApiRunner ?? runAiApiJudgment
@@ -239,7 +278,9 @@ export class RunEngine {
           priceProfile,
           costLimitUsd: project.settings.ai.costLimitUsd,
           apiKey: (this.dependencies.openAiApiKey ?? (() => process.env.OPENAI_API_KEY))(),
+          signal,
           onProgress: async progress => {
+            throwIfAborted(signal)
             this.applyApiProgress(result, progress, false)
             await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
           },
@@ -278,30 +319,37 @@ export class RunEngine {
     inspector: WebsiteInspector,
     probe: LinkProbe,
     aiCandidates: AiSourceCandidate[],
+    signal?: AbortSignal,
   ): Promise<void> {
     while (true) {
+      throwIfAborted(signal)
       const next = queue.shift()
       if (!next) return
       const [normalizedUrl, rows] = next
       const startedAt = this.dependencies.now().toISOString()
       let pageResult: PageResult
       try {
-        const inspection = await inspector.inspect(rows[0]!.url)
-        pageResult = await this.buildSuccessfulPage(normalizedUrl, rows, input, inspection, probe, startedAt)
+        const inspection = await inspector.inspect(rows[0]!.url, signal)
+        throwIfAborted(signal)
+        pageResult = await this.buildSuccessfulPage(normalizedUrl, rows, input, inspection, probe, startedAt, signal)
+        throwIfAborted(signal)
         result.links.push(...pageResultLinks.get(pageResult)!)
         result.images.push(...pageResultImages.get(pageResult)!)
         result.googleTagDetections.push(...pageResultTags.get(pageResult)!)
         aiCandidates.push(...(pageResultAiCandidates.get(pageResult) ?? []))
       } catch (error) {
+        if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
         pageResult = buildFailedPageResult(normalizedUrl, rows, startedAt, this.dependencies.now().toISOString(), error)
       } finally {
         // WeakMaps are only temporary carriers so the persisted page structure stays specification-focused.
       }
+      throwIfAborted(signal)
       result.pages.push(pageResult)
       result.pages.sort((left, right) => left.sourceRows[0]! - right.sourceRows[0]!)
       result.updatedAt = this.dependencies.now().toISOString()
       result.summary = summarize(result)
       await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
+      throwIfAborted(signal)
       await this.event(result, 'page_completed', { url: normalizedUrl, verdict: pageResult.findings[0]?.verdict })
       pageResultLinks.delete(pageResult)
       pageResultImages.delete(pageResult)
@@ -317,6 +365,7 @@ export class RunEngine {
     inspection: PageInspection,
     probe: LinkProbe,
     startedAt: string,
+    signal?: AbortSignal,
   ): Promise<PageResult> {
     const pageNames = rows.map(row => row.displayName)
     const sourceRows = rows.map(row => row.sourceRow)
@@ -343,7 +392,7 @@ export class RunEngine {
       network: inspection.networkTags,
       expected: input.expectedGoogleTags,
     })
-    const links = await checkLinks(normalizedUrl, inspection.links, new Set(inspection.anchorTargets), probe, undefined, inspection.finalUrl)
+    const links = await checkLinks(normalizedUrl, inspection.links, new Set(inspection.anchorTargets), probe, signal, inspection.finalUrl)
     const images = inspection.images.flatMap(viewport => checkImages(
       normalizedUrl,
       viewport.device,
@@ -385,13 +434,19 @@ export class RunEngine {
     return page
   }
 
-  private async transition(result: RunResult, status: RunResult['status'], setStarted = false): Promise<void> {
+  private async transition(result: RunResult, status: RunResult['status'], setStarted = false, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal)
     result.status = status
     const now = this.dependencies.now().toISOString()
     if (setStarted && !result.startedAt) result.startedAt = now
     result.updatedAt = now
     await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
     await this.event(result, 'status_changed', { status })
+    throwIfAborted(signal)
+  }
+
+  runStore(): RunStore {
+    return this.dependencies.runStore
   }
 
   private async event(result: RunResult, type: string, details: Record<string, unknown> = {}): Promise<void> {
@@ -424,7 +479,7 @@ interface PreparedRun {
 }
 
 export class RunCoordinator {
-  private active: Promise<RunResult> | null = null
+  private active: ActiveRunHandle | null = null
   private starting = false
 
   constructor(private readonly engine: RunEngine) {}
@@ -434,7 +489,18 @@ export class RunCoordinator {
     this.starting = true
     try {
       const prepared = await this.engine.prepare(projectId)
-      this.active = this.engine.execute(prepared).finally(() => { this.active = null })
+      const controller = new AbortController()
+      const handle: ActiveRunHandle = {
+        projectId,
+        runId: prepared.result.runId,
+        controller,
+        result: prepared.result,
+        promise: Promise.resolve(prepared.result),
+      }
+      handle.promise = this.engine.execute(prepared, controller.signal).finally(() => {
+        if (this.active === handle) this.active = null
+      })
+      this.active = handle
       return prepared.result
     } finally {
       this.starting = false
@@ -444,6 +510,61 @@ export class RunCoordinator {
   isRunning(): boolean {
     return this.starting || this.active !== null
   }
+
+  async cancel(projectId: string, runId: string): Promise<CancelRunResult> {
+    const persisted = await this.engine.runStore().get(projectId, runId)
+    const handle = this.active
+    if (!handle || handle.projectId !== projectId || handle.runId !== runId) {
+      if (persisted.status === 'canceled') {
+        return { runId, status: 'canceled', cancelRequestedAt: persisted.termination?.requestedAt, idempotent: true }
+      }
+      if (isActiveRun(persisted.status) && persisted.termination?.kind === 'canceled' && persisted.termination.requestedAt) {
+        return { runId, status: persisted.status, cancelRequestedAt: persisted.termination.requestedAt, idempotent: true }
+      }
+      throw new RunCancelConflictError(isActiveRun(persisted.status)
+        ? 'このプロセスで実行中の検査ではないためキャンセルできません。'
+        : 'この検査はすでに終了しています。')
+    }
+    if (handle.cancelRequestedAt) {
+      return { runId, status: handle.result.status, cancelRequestedAt: handle.cancelRequestedAt, idempotent: true }
+    }
+    if (!isActiveRun(handle.result.status)) throw new RunCancelConflictError('この検査はすでに終了しています。')
+    const requestedAt = new Date().toISOString()
+    handle.cancelRequestedAt = requestedAt
+    handle.result.termination = {
+      kind: 'canceled',
+      reasonCode: 'USER_REQUESTED',
+      previousStatus: handle.result.status as ActiveRunStatus,
+      requestedAt,
+    }
+    handle.controller.abort()
+    await this.engine.runStore().updateResult(projectId, runId, (current) => {
+      current.termination = { ...handle.result.termination! }
+    })
+    await this.engine.runStore().appendEvent(projectId, runId, {
+      at: requestedAt,
+      type: 'run_cancel_requested',
+      previousStatus: handle.result.termination.previousStatus,
+      reasonCode: 'USER_REQUESTED',
+    })
+    return { runId, status: handle.result.status, cancelRequestedAt: requestedAt, idempotent: false }
+  }
+}
+
+interface ActiveRunHandle {
+  projectId: string
+  runId: string
+  controller: AbortController
+  result: RunResult
+  promise: Promise<RunResult>
+  cancelRequestedAt?: string
+}
+
+export interface CancelRunResult {
+  runId: string
+  status: RunResult['status']
+  cancelRequestedAt?: string
+  idempotent: boolean
 }
 
 export function createRunConfig(settings: ProjectSettings): SanitizedRunConfig {
@@ -475,7 +596,7 @@ function defaultDependencies(): RunEngineDependencies {
   const projectStore = useProjectStore()
   return {
     projectStore,
-    runStore: new RunStore(projectStore.projectsDir),
+    runStore: useRunStore(),
     inspectorFactory: createPlaywrightInspector,
     linkProbeFactory: (settings, config) => new SafeLinkProbe(
       new NetworkPolicy({ allowedPrivateHosts: settings.allowedPrivateHosts }),

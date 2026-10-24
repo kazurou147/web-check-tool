@@ -12,7 +12,7 @@ import type {
 } from '~/shared/types/run'
 import type { AiPreparationStatus, AiVerdict } from '~/shared/types/ai'
 import { buildCodexManualInstructions, judgmentByItemId, manualAiCounts, manualAiQualityWarnings } from '~/shared/utils/manual-ai'
-import { highestFindingVerdict, imageVerdictCounts, isActiveRun, runProgress, sortFindings } from '~/shared/utils/run-display'
+import { canCancelRun, highestFindingVerdict, imageVerdictCounts, isActiveRun, runProgress, sortFindings } from '~/shared/utils/run-display'
 
 const props = defineProps<{
   projectId: string
@@ -38,6 +38,7 @@ const runMessageKind = ref<'success' | 'error'>('success')
 const importingAi = ref(false)
 const downloadingAi = ref(false)
 const downloadingExcel = ref(false)
+const canceling = ref(false)
 const aiFileInput = ref<HTMLInputElement | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
@@ -57,7 +58,10 @@ onMounted(async () => {
 
 onBeforeUnmount(stopPolling)
 
-watch(() => result.value?.status, syncPolling)
+watch(() => result.value?.status, (status) => {
+  if (status && !isActiveRun(status)) canceling.value = false
+  syncPolling()
+})
 
 async function startRun() {
   if (!canStart.value) return
@@ -75,6 +79,33 @@ async function startRun() {
     await refreshHistory().catch(() => undefined)
   } finally {
     starting.value = false
+  }
+}
+
+async function cancelRun() {
+  if (!result.value || !selectedRunId.value || !canCancelRun(result.value.status, canceling.value)) return
+  const confirmed = window.confirm('検査をキャンセルしますか？ 完了済みページとAI判定バッチの途中結果は保持されます。OpenAI APIへ送信済みの処理は、キャンセル後も料金が発生する場合があります。')
+  if (!confirmed) return
+  canceling.value = true
+  let accepted = false
+  try {
+    const response = await $fetch<{ message: string }>(
+      `/api/projects/${props.projectId}/runs/${selectedRunId.value}/cancel`,
+      { method: 'POST' },
+    )
+    accepted = true
+    setRunMessage(response.message, 'success')
+    await Promise.all([loadRun(selectedRunId.value, false), refreshHistory()])
+  } catch (caught) {
+    const message = getErrorMessage(caught)
+    if ((caught as { statusCode?: number }).statusCode === 409 || (caught as { response?: { status?: number } }).response?.status === 409) {
+      setRunMessage(`キャンセル要求時点で検査はすでに終了していました。${message}`, 'success')
+    } else {
+      setRunMessage(message, 'error')
+    }
+    await Promise.all([loadRun(selectedRunId.value, false), refreshHistory().catch(() => undefined)])
+  } finally {
+    if (!accepted) canceling.value = false
   }
 }
 
@@ -320,6 +351,8 @@ const aiStatusLabels: Record<AiPreparationStatus, string> = {
   api_checking: 'API判定中',
   api_failed: 'API判定失敗',
   completed: '判定完了',
+  canceled: 'キャンセル済み',
+  interrupted: '異常終了による中断',
   preparation_failed: '入力準備失敗',
 }
 const aiVerdictLabels: Record<AiVerdict, string> = {
@@ -390,8 +423,25 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
               >
                 {{ downloadingExcel ? 'Excel生成中…' : 'Excelレポートをダウンロード' }}
               </button>
+              <button
+                v-if="activeResult"
+                class="button danger"
+                type="button"
+                :disabled="canceling"
+                @click="cancelRun"
+              >
+                {{ canceling ? 'キャンセル処理中…' : '検査をキャンセル' }}
+              </button>
             </div>
           </div>
+
+          <p v-if="result.termination" class="notice">
+            <strong>{{ result.termination.kind === 'canceled' ? 'キャンセル' : '異常終了からの復旧' }}:</strong>
+            {{ result.termination.kind === 'canceled'
+              ? '完了済みの途中結果を保持して検査を終了しました。'
+              : 'アプリ再起動時に実行中だったため、中断状態として確定しました。自動再実行はしていません。' }}
+            （直前の状態: {{ statusLabels[result.termination.previousStatus] }}）
+          </p>
 
           <div class="progress-block" aria-label="検査進捗">
             <div class="progress-copy">

@@ -43,10 +43,13 @@ ExcelJSは保存済み行の`hidden`状態を読み取れるため、手動非�
 - `POST /api/projects/:projectId/runs`: Excelを再読込して検査を開始
 - `GET /api/projects/:projectId/runs`: 保存済みの検査履歴を取得
 - `GET /api/projects/:projectId/runs/:runId`: 途中結果または完了結果を取得
+- `POST /api/projects/:projectId/runs/:runId/cancel`: 実行中の検査へキャンセルを要求
 
 検査はPlaywright ChromiumでJavaScript描画後DOMを取得し、title・description、Googleタグ、リンク、PC・スマートフォン画像を判定します。アプリ全体で同時に1ジョブ、案件設定内で1〜3ページ並列です。アクセス前のDNS検証、各リダイレクトの再検証、ローカル・私設IPの既定拒否、GET/HEAD制限、時間・サイズ・リダイレクト上限を適用します。ローカル・私設IPが必要な案件だけ、設定画面でホストを明示許可してください。
 
 案件詳細画面では検査開始、2秒間隔の進捗更新、判定集計、ページ別の期待値・実測値・根拠、Googleタグ・リンク・画像の詳細、過去履歴を確認できます。画面更新後も保存済みrunを再読込します。
+
+キャンセル時は完了済みのページ結果とAI判定バッチを保持し、未完了ページをNGとして追加しません。アプリの異常終了後は、次回起動時に実行中だったrunを「中断」として確定し、Web検査やOpenAI APIを自動再実行しません。同じ`DATA_DIR`を利用するアプリは単一インスタンスに制限されます。OpenAI APIへすでに受理されたリクエストは、キャンセル後も料金が発生する可能性があります。
 
 ## AIリンク内容判定
 

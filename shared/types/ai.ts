@@ -131,6 +131,8 @@ export type AiPreparationStatus =
   | 'api_checking'
   | 'api_failed'
   | 'completed'
+  | 'canceled'
+  | 'interrupted'
   | 'preparation_failed'
 
 export interface AiManualResult {

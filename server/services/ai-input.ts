@@ -11,6 +11,7 @@ import type {
 } from '~/shared/types/ai'
 import type { LinkProbe } from './checks/links'
 import { AiMaskingAccumulator } from './ai-masking'
+import { isAbortError, RunCanceledError, throwIfAborted } from './abort'
 
 export const AI_CONTRACT_VERSION = '1.1.0'
 export const AI_PROMPT_VERSION = '1.2.0'
@@ -54,6 +55,7 @@ export interface BuildAiInputBundleOptions {
   signingKey: Uint8Array
   now?: () => Date
   createBundleId?: () => string
+  signal?: AbortSignal
 }
 
 const codePointString = (limit: number) => z.string().refine(
@@ -138,8 +140,10 @@ export async function buildAiInputBundle(options: BuildAiInputBundleOptions): Pr
 
   for (const group of grouped) {
     try {
+      throwIfAborted(options.signal)
       const primary = group.candidates[0]!
-      const rawTarget = await getTarget(primary.resolvedUrl, options.probe, targetCache)
+      const rawTarget = await getTarget(primary.resolvedUrl, options.probe, targetCache, options.signal)
+      throwIfAborted(options.signal)
       const masking = new AiMaskingAccumulator()
       const source = {
         pageUrl: maskAndLimit(masking, 'url', primary.pageUrl, 4_096, 'start'),
@@ -164,7 +168,8 @@ export async function buildAiInputBundle(options: BuildAiInputBundleOptions): Pr
         target,
         masking: masking.summary(),
       })
-    } catch {
+    } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw new RunCanceledError()
       throw new AiInputBuildError('AI_INPUT_ITEM_BUILD_FAILED', 'item_build', { itemSequence: items.length })
     }
   }
@@ -328,7 +333,8 @@ function normalizeAiTargetUrl(value: string): string | undefined {
   }
 }
 
-async function getTarget(value: string, probe: LinkProbe, cache: Map<string, Promise<RawTarget>>): Promise<RawTarget> {
+async function getTarget(value: string, probe: LinkProbe, cache: Map<string, Promise<RawTarget>>, signal?: AbortSignal): Promise<RawTarget> {
+  throwIfAborted(signal)
   const normalizedUrl = normalizeAiTargetUrl(value)
   if (!normalizedUrl) {
     return unavailable(value, 'unsupported_protocol', 'HTTP/HTTPS以外のリンクはAI判定対象外です。')
@@ -336,14 +342,18 @@ async function getTarget(value: string, probe: LinkProbe, cache: Map<string, Pro
   if (/\.pdf(?:$|[?#])/iu.test(normalizedUrl)) {
     return unavailable(normalizedUrl, 'pdf', 'PDFはAIリンク内容判定の対象外です。')
   }
-  const pending = cache.get(normalizedUrl) ?? fetchTarget(normalizedUrl, probe)
+  const pending = cache.get(normalizedUrl) ?? fetchTarget(normalizedUrl, probe, signal)
   cache.set(normalizedUrl, pending)
   return addAnchorTarget(await pending, extractUrlFragment(value))
 }
 
-async function fetchTarget(normalizedUrl: string, probe: LinkProbe): Promise<RawTarget> {
+async function fetchTarget(normalizedUrl: string, probe: LinkProbe, signal?: AbortSignal): Promise<RawTarget> {
   try {
-    const response = await probe.probe(normalizedUrl, true)
+    throwIfAborted(signal)
+    const response = signal
+      ? await probe.probe(normalizedUrl, true, signal)
+      : await probe.probe(normalizedUrl, true)
+    throwIfAborted(signal)
     if (response.status < 200 || response.status >= 300) {
       return unavailable(normalizedUrl, 'http_error', `リンク先を取得できませんでした（HTTP ${response.status}）。`, response.finalUrl)
     }
@@ -358,7 +368,8 @@ async function fetchTarget(normalizedUrl: string, probe: LinkProbe): Promise<Raw
       fetchStatus: 'available',
       rawHtml: response.body ?? '',
     }
-  } catch {
+  } catch (error) {
+    if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
     return unavailable(normalizedUrl, 'fetch_failed', 'AI判定用のリンク先情報を安全に取得できませんでした。')
   }
 }

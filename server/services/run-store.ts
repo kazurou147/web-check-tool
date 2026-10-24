@@ -2,11 +2,18 @@ import { randomBytes } from 'node:crypto'
 import { appendFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { InputSnapshot } from '~/shared/types/excel-input'
-import type { RunResult, RunSummary } from '~/shared/types/run'
+import type { ActiveRunStatus, RunResult, RunSummary } from '~/shared/types/run'
+import { activeRunStatuses } from '~/shared/utils/run-display'
 import { projectIdSchema } from './validation'
 
 export class RunNotFoundError extends Error {}
 export class RunReportNotFoundError extends Error {}
+export class RunRecoveryError extends Error {}
+
+export interface RunRecoveryReport {
+  recovered: Array<{ projectId: string; runId: string; previousStatus: ActiveRunStatus }>
+  skippedInvalid: number
+}
 
 export class RunStore {
   private readonly writeQueues = new Map<string, Promise<void>>()
@@ -130,8 +137,62 @@ export class RunStore {
         totalPages: result.input.uniqueUrlCount,
         completedPages: result.pages.length,
         summary: result.summary,
+        termination: result.termination,
         fatalError: result.fatalError,
       }))
+  }
+
+  async recoverInterruptedRuns(now: Date = new Date()): Promise<RunRecoveryReport> {
+    const report: RunRecoveryReport = { recovered: [], skippedInvalid: 0 }
+    let projects
+    try {
+      projects = await readdir(this.projectsDir, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return report
+      throw error
+    }
+    for (const project of projects) {
+      if (!project.isDirectory() || !projectIdSchema.safeParse(project.name).success) continue
+      const runsDir = join(this.projectsDir, project.name, 'runs')
+      let runs
+      try {
+        runs = await readdir(runsDir, { withFileTypes: true })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      for (const run of runs) {
+        if (!run.isDirectory() || !projectIdSchema.safeParse(run.name).success) continue
+        try {
+          const current = await this.get(project.name, run.name)
+          if (!activeRunStatuses.includes(current.status)) continue
+          const previousStatus = current.status as ActiveRunStatus
+          const finalizedAt = now.toISOString()
+          current.status = 'interrupted'
+          current.finishedAt = finalizedAt
+          current.updatedAt = finalizedAt
+          current.termination = {
+            kind: 'interrupted',
+            reasonCode: 'PROCESS_RESTART',
+            previousStatus,
+            finalizedAt,
+          }
+          if (current.ai?.status === 'api_checking' || current.ai?.status === 'preparing') current.ai.status = 'interrupted'
+          await this.saveResult(project.name, run.name, current)
+          await this.appendEvent(project.name, run.name, {
+            at: finalizedAt,
+            type: 'run_interrupted',
+            previousStatus,
+            reasonCode: 'PROCESS_RESTART',
+          }).catch(() => undefined)
+          report.recovered.push({ projectId: project.name, runId: run.name, previousStatus })
+        } catch (error) {
+          report.skippedInvalid += 1
+          throw new RunRecoveryError(`run ${run.name} の起動時復旧に失敗しました。`, { cause: error })
+        }
+      }
+    }
+    return report
   }
 
   private async enqueue<T>(path: string, task: () => Promise<T>): Promise<T> {
@@ -190,12 +251,25 @@ async function atomicWrite(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
   await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' })
-  await rename(temporary, path)
+  await renameWithWindowsRetry(temporary, path)
 }
 
 async function atomicWriteBytes(path: string, bytes: Uint8Array): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
   await writeFile(temporary, bytes, { flag: 'wx' })
-  await rename(temporary, path)
+  await renameWithWindowsRetry(temporary, path)
+}
+
+async function renameWithWindowsRetry(source: string, destination: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '') || attempt >= 4) throw error
+      await new Promise(resolve => setTimeout(resolve, 20 * (attempt + 1)))
+    }
+  }
 }
