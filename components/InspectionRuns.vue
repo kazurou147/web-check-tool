@@ -13,6 +13,7 @@ import type {
 import type { AiPreparationStatus, AiVerdict } from '~/shared/types/ai'
 import type { AiMode } from '~/shared/types/ai'
 import type { ProjectSettings } from '~/shared/types/project'
+import type { RunHistoryHealth } from '~/shared/types/project'
 import { buildCodexManualInstructions, judgmentByItemId, manualAiCounts, manualAiQualityWarnings } from '~/shared/utils/manual-ai'
 import { canCancelRun, highestFindingVerdict, imageVerdictCounts, isActiveRun, runProgress, sortFindings } from '~/shared/utils/run-display'
 
@@ -26,11 +27,12 @@ const props = defineProps<{
 
 const route = useRoute()
 const router = useRouter()
-const { data: initialHistory, error: initialHistoryError } = await useFetch<{ runs: RunSummary[] }>(
+const { data: initialHistory, error: initialHistoryError } = await useFetch<{ runs: RunSummary[]; historyHealth: RunHistoryHealth }>(
   `/api/projects/${props.projectId}/runs`,
 )
 
 const runs = ref<RunSummary[]>(initialHistory.value?.runs ?? [])
+const historyHealth = ref<RunHistoryHealth>(initialHistory.value?.historyHealth ?? { corruptedCount: 0, oversizedCount: 0 })
 const queryRunId = typeof route.query.run === 'string' ? route.query.run : ''
 const selectedRunId = ref(runs.value.some(run => run.runId === queryRunId) ? queryRunId : runs.value[0]?.runId ?? '')
 const result = ref<RunResult | null>(null)
@@ -160,8 +162,9 @@ async function loadRun(runId: string, updateRoute = true) {
 }
 
 async function refreshHistory() {
-  const response = await $fetch<{ runs: RunSummary[] }>(`/api/projects/${props.projectId}/runs`)
+  const response = await $fetch<{ runs: RunSummary[]; historyHealth: RunHistoryHealth }>(`/api/projects/${props.projectId}/runs`)
   runs.value = response.runs
+  historyHealth.value = response.historyHealth
 }
 
 async function downloadAiInput() {
@@ -467,6 +470,9 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
     <p v-if="!hasExcel" class="notice">検査を開始するにはExcelを登録してください。</p>
     <p v-else-if="archived" class="notice">アーカイブ中は新しい検査を開始できません。過去の結果は閲覧できます。</p>
     <p v-if="initialHistoryError" class="notice error">検査履歴を読み込めませんでした。</p>
+    <p v-if="historyHealth.corruptedCount || historyHealth.oversizedCount" class="notice error">
+      読み取れない履歴があります（破損 {{ historyHealth.corruptedCount }}件／過大 {{ historyHealth.oversizedCount }}件）。削除・修復は行わず、正常な履歴だけを表示しています。
+    </p>
     <p v-if="runMessage" class="notice" :class="runMessageKind">{{ runMessage }}</p>
 
     <div v-if="runs.length" class="run-workspace">
@@ -794,5 +800,12 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
     </div>
 
     <p v-else class="empty-inline">検査履歴はまだありません。</p>
+
+    <RunComparison
+      v-if="runs.length"
+      :project-id="projectId"
+      :runs="runs"
+      :selected-run-id="selectedRunId"
+    />
   </section>
 </template>

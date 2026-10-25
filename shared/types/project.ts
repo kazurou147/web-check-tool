@@ -1,4 +1,5 @@
 import type { AiMode } from './ai'
+import type { RunSummary } from './run'
 import { DEFAULT_AI_MODEL, DEFAULT_AI_PRICE_PROFILE_ID } from '~/shared/config/ai-pricing'
 
 export type AuthMode = 'none' | 'basic' | 'form'
@@ -36,6 +37,17 @@ export interface Project {
 
 export interface ProjectView extends Project {
   credentialsConfigured: boolean
+}
+
+export interface RunHistoryHealth {
+  corruptedCount: number
+  oversizedCount: number
+}
+
+export interface ProjectListItem extends ProjectView {
+  latestRun: RunSummary | null
+  latestCompletedRun: RunSummary | null
+  historyHealth: RunHistoryHealth
 }
 
 export interface ProjectSecrets {

@@ -74,6 +74,19 @@ export const projectMutationSchema = z.object({
 
 export const projectIdSchema = z.uuid()
 
+export const runComparisonQuerySchema = z.object({
+  base: projectIdSchema,
+  target: projectIdSchema,
+  category: z.enum(['aggregate', 'detail', 'ai', 'input']).optional(),
+  pageUrl: z.string().max(2_048).optional(),
+  item: z.string().max(100).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+}).strict().refine(value => value.base !== value.target, {
+  message: '同じ検査結果同士は比較できません',
+  path: ['target'],
+})
+
 export const rerunRequestSchema = z.object({
   configSource: z.enum(['current_project', 'source_run']).default('current_project'),
   aiMode: z.enum(['off', 'manual', 'api']).default('off'),

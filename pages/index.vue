@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import type { ProjectView } from '~/shared/types/project'
+import type { ProjectListItem } from '~/shared/types/project'
 
-const { data, status, error, refresh } = await useFetch<{ projects: ProjectView[] }>('/api/projects')
+const { data, status, error, refresh } = await useFetch<{ projects: ProjectListItem[] }>('/api/projects')
 const busyId = ref('')
 
-async function archive(project: ProjectView) {
+async function archive(project: ProjectListItem) {
   if (!confirm(`「${project.name}」をアーカイブしますか？ファイルと履歴は保持されます。`)) return
   busyId.value = project.projectId
   try {

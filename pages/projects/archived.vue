@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import type { ProjectView } from '~/shared/types/project'
+import type { ProjectListItem } from '~/shared/types/project'
 
-const { data, status, error, refresh } = await useFetch<{ projects: ProjectView[] }>('/api/projects/archived')
+const { data, status, error, refresh } = await useFetch<{ projects: ProjectListItem[] }>('/api/projects/archived')
 const busyId = ref('')
 
-async function unarchive(project: ProjectView) {
+async function unarchive(project: ProjectListItem) {
   busyId.value = project.projectId
   try {
     await $fetch(`/api/projects/${project.projectId}/unarchive`, { method: 'POST' })

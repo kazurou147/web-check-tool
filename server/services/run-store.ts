@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { InputSnapshot } from '~/shared/types/excel-input'
+import type { RunHistoryHealth } from '~/shared/types/project'
 import type { ActiveRunStatus, RunResult, RunSummary } from '~/shared/types/run'
 import { activeRunStatuses } from '~/shared/utils/run-display'
 import { projectIdSchema } from './validation'
@@ -9,6 +10,16 @@ import { projectIdSchema } from './validation'
 export class RunNotFoundError extends Error {}
 export class RunReportNotFoundError extends Error {}
 export class RunRecoveryError extends Error {}
+export class RunCorruptError extends Error {}
+export class RunTooLargeError extends Error {}
+
+export const MAX_RUN_RESULT_BYTES = 50 * 1024 * 1024
+const RUN_LIST_READ_CONCURRENCY = 4
+
+export interface RunListResult {
+  runs: RunSummary[]
+  health: RunHistoryHealth
+}
 
 export interface RunRecoveryReport {
   recovered: Array<{ projectId: string; runId: string; previousStatus: ActiveRunStatus }>
@@ -91,16 +102,24 @@ export class RunStore {
   }
 
   async get(projectId: string, runId: string): Promise<RunResult> {
-    try {
-      const value = JSON.parse(await readFile(join(this.runDir(projectId, runId), 'result.json'), 'utf8')) as RunResult
-      if (value.schemaVersion !== 1 || value.projectId !== projectId || value.runId !== runId) {
-        throw new Error('検査結果の形式が不正です')
+    const path = join(this.runDir(projectId, runId), 'result.json')
+    return await this.enqueue(path, async () => {
+      try {
+        if ((await stat(path)).size > MAX_RUN_RESULT_BYTES) {
+          throw new RunTooLargeError('検査結果が読込上限を超えています')
+        }
+        const value = JSON.parse(await readFile(path, 'utf8')) as RunResult
+        if (value.schemaVersion !== 1 || value.projectId !== projectId || value.runId !== runId) {
+          throw new RunCorruptError('検査結果の形式が不正です')
+        }
+        return normalizeLegacyRun(value)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RunNotFoundError('検査結果が見つかりません')
+        if (error instanceof RunTooLargeError || error instanceof RunCorruptError) throw error
+        if (error instanceof SyntaxError) throw new RunCorruptError('検査結果を読み取れません')
+        throw error
       }
-      return normalizeLegacyRun(value)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RunNotFoundError('検査結果が見つかりません')
-      throw error
-    }
+    })
   }
 
   async resultFileSize(projectId: string, runId: string): Promise<number> {
@@ -113,43 +132,47 @@ export class RunStore {
   }
 
   async list(projectId: string): Promise<RunSummary[]> {
+    return (await this.listDetailed(projectId)).runs
+  }
+
+  async listDetailed(projectId: string): Promise<RunListResult> {
     const directory = join(this.projectsDir, projectId, 'runs')
     let entries
     try {
       entries = await readdir(directory, { withFileTypes: true })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { runs: [], health: { corruptedCount: 0, oversizedCount: 0 } }
+      }
       throw error
     }
-    const results = (await Promise.all(entries
+    const health: RunHistoryHealth = { corruptedCount: 0, oversizedCount: 0 }
+    const names = entries
       .filter(entry => entry.isDirectory() && projectIdSchema.safeParse(entry.name).success)
-      .map(async (entry) => {
+      .map(entry => entry.name)
+    const results = (await mapWithConcurrency(names, RUN_LIST_READ_CONCURRENCY, async (runId) => {
         try {
-          return await this.get(projectId, entry.name)
+          return await this.get(projectId, runId)
         } catch (error) {
           // A concurrent run creation may expose its directory just before the
           // initial atomic result file is visible. The next poll will include it.
           if (error instanceof RunNotFoundError) return undefined
+          if (error instanceof RunCorruptError) {
+            health.corruptedCount += 1
+            return undefined
+          }
+          if (error instanceof RunTooLargeError) {
+            health.oversizedCount += 1
+            return undefined
+          }
           throw error
         }
-      }))).filter((result): result is RunResult => result !== undefined)
+      })).filter((result): result is RunResult => result !== undefined)
 
-    return results
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .map(result => ({
-        runId: result.runId,
-        rerunOfRunId: result.rerunOfRunId,
-        status: result.status,
-        createdAt: result.createdAt,
-        startedAt: result.startedAt,
-        finishedAt: result.finishedAt,
-        updatedAt: result.updatedAt,
-        totalPages: result.input.uniqueUrlCount,
-        completedPages: result.pages.length,
-        summary: result.summary,
-        termination: result.termination,
-        fatalError: result.fatalError,
-      }))
+    const runs = results
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.runId.localeCompare(left.runId))
+      .map(toRunSummary)
+    return { runs, health }
   }
 
   async recoverInterruptedRuns(now: Date = new Date()): Promise<RunRecoveryReport> {
@@ -198,6 +221,7 @@ export class RunStore {
           report.recovered.push({ projectId: project.name, runId: run.name, previousStatus })
         } catch (error) {
           report.skippedInvalid += 1
+          if (error instanceof RunCorruptError || error instanceof RunTooLargeError) continue
           throw new RunRecoveryError(`run ${run.name} の起動時復旧に失敗しました。`, { cause: error })
         }
       }
@@ -220,6 +244,37 @@ export class RunStore {
   }
 }
 
+function toRunSummary(result: RunResult): RunSummary {
+  return {
+    runId: result.runId,
+    rerunOfRunId: result.rerunOfRunId,
+    status: result.status,
+    createdAt: result.createdAt,
+    startedAt: result.startedAt,
+    finishedAt: result.finishedAt,
+    updatedAt: result.updatedAt,
+    totalPages: result.input.uniqueUrlCount,
+    completedPages: result.pages.length,
+    summary: result.summary,
+    termination: result.termination,
+    fatalError: result.fatalError,
+  }
+}
+
+async function mapWithConcurrency<T, U>(items: T[], concurrency: number, mapper: (item: T) => Promise<U>): Promise<U[]> {
+  const results = new Array<U>(items.length)
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await mapper(items[index]!)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
 function normalizeLegacyRun(value: RunResult): RunResult {
   const mode = value.configSnapshot.aiMode ?? 'off'
   const aiUsage = value.aiUsage ?? {
@@ -233,6 +288,22 @@ function normalizeLegacyRun(value: RunResult): RunResult {
   return {
     ...value,
     configSnapshot: { ...value.configSnapshot, aiMode: mode },
+    input: {
+      ...value.input,
+      pageRows: value.input.pageRows ?? [],
+      invalidRows: value.input.invalidRows ?? [],
+      headerIssues: value.input.headerIssues ?? [],
+      formulaIssues: value.input.formulaIssues ?? [],
+      mergeIssues: value.input.mergeIssues ?? [],
+      tagIssues: value.input.tagIssues ?? [],
+      duplicateGroups: value.input.duplicateGroups ?? [],
+      expectedGoogleTags: value.input.expectedGoogleTags ?? [],
+    },
+    summary: { ...value.summary, excluded: value.summary.excluded ?? 0 },
+    pages: value.pages ?? [],
+    links: value.links ?? [],
+    images: value.images ?? [],
+    googleTagDetections: value.googleTagDetections ?? [],
     aiUsage: {
       ...aiUsage,
       cachedInputTokens: aiUsage.cachedInputTokens ?? 0,

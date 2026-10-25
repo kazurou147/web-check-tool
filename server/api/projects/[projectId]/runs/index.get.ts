@@ -7,7 +7,8 @@ export default defineEventHandler(async (event) => {
   const projectId = requireProjectId(event)
   try {
     await useProjectStore().get(projectId)
-    return { runs: await useRunStore().list(projectId) }
+    const history = await useRunStore().listDetailed(projectId)
+    return { runs: history.runs, historyHealth: history.health }
   } catch (error) {
     return toApiError(error)
   }
