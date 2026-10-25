@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { appendFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { InputSnapshot } from '~/shared/types/excel-input'
 import type { ActiveRunStatus, RunResult, RunSummary } from '~/shared/types/run'
@@ -103,6 +103,15 @@ export class RunStore {
     }
   }
 
+  async resultFileSize(projectId: string, runId: string): Promise<number> {
+    try {
+      return (await stat(join(this.runDir(projectId, runId), 'result.json'))).size
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RunNotFoundError('検査結果が見つかりません')
+      throw error
+    }
+  }
+
   async list(projectId: string): Promise<RunSummary[]> {
     const directory = join(this.projectsDir, projectId, 'runs')
     let entries
@@ -129,6 +138,7 @@ export class RunStore {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .map(result => ({
         runId: result.runId,
+        rerunOfRunId: result.rerunOfRunId,
         status: result.status,
         createdAt: result.createdAt,
         startedAt: result.startedAt,

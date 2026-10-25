@@ -11,6 +11,8 @@ import type {
   Verdict,
 } from '~/shared/types/run'
 import type { AiPreparationStatus, AiVerdict } from '~/shared/types/ai'
+import type { AiMode } from '~/shared/types/ai'
+import type { ProjectSettings } from '~/shared/types/project'
 import { buildCodexManualInstructions, judgmentByItemId, manualAiCounts, manualAiQualityWarnings } from '~/shared/utils/manual-ai'
 import { canCancelRun, highestFindingVerdict, imageVerdictCounts, isActiveRun, runProgress, sortFindings } from '~/shared/utils/run-display'
 
@@ -18,6 +20,8 @@ const props = defineProps<{
   projectId: string
   archived: boolean
   hasExcel: boolean
+  settings: ProjectSettings
+  credentialsConfigured: boolean
 }>()
 
 const route = useRoute()
@@ -38,14 +42,35 @@ const runMessageKind = ref<'success' | 'error'>('success')
 const importingAi = ref(false)
 const downloadingAi = ref(false)
 const downloadingExcel = ref(false)
+const downloadingJson = ref(false)
 const canceling = ref(false)
+const rerunning = ref(false)
+const showRerunDialog = ref(false)
+const rerunConfigSource = ref<'current_project' | 'source_run'>('current_project')
+const rerunAiMode = ref<AiMode>('off')
+const confirmPaidApi = ref(false)
 const aiFileInput = ref<HTMLInputElement | null>(null)
+const { data: aiConfig } = await useFetch<{ apiKeyConfigured: boolean }>('/api/ai/config')
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
 const progress = computed(() => result.value ? runProgress(result.value) : { completed: 0, total: 0, percent: 0 })
 const activeResult = computed(() => Boolean(result.value && isActiveRun(result.value.status)))
 const hasActiveRun = computed(() => activeResult.value || runs.value.some(run => isActiveRun(run.status)))
 const canStart = computed(() => props.hasExcel && !props.archived && !starting.value && !hasActiveRun.value)
+const canRerun = computed(() => Boolean(result.value && !activeResult.value && !props.archived && props.hasExcel && !hasActiveRun.value && !rerunning.value))
+const rerunDifferences = computed(() => {
+  if (!result.value) return []
+  const source = result.value.configSnapshot
+  const differences: string[] = []
+  if (source.pageConcurrency !== props.settings.pageConcurrency) differences.push(`ページ並列数: 過去 ${source.pageConcurrency}／現在 ${props.settings.pageConcurrency}`)
+  if (source.navigationTimeoutMs !== props.settings.navigationTimeoutMs) differences.push(`ページ遷移タイムアウト: 過去 ${source.navigationTimeoutMs / 1000}秒／現在 ${props.settings.navigationTimeoutMs / 1000}秒`)
+  if (source.authMode !== props.settings.auth.mode) differences.push(`認証モード: 過去 ${source.authMode}／現在 ${props.settings.auth.mode}`)
+  if (source.aiMode !== props.settings.ai.mode) differences.push(`AIモード: 過去 ${source.aiMode.toUpperCase()}／現在 ${props.settings.ai.mode.toUpperCase()}`)
+  const sourceHosts = [...(source.allowedPrivateHosts ?? [])].sort().join(', ')
+  const currentHosts = [...props.settings.allowedPrivateHosts].sort().join(', ')
+  if (sourceHosts !== currentHosts) differences.push(`許可プライベートホスト: 過去 ${sourceHosts || 'なし'}／現在 ${currentHosts || 'なし'}`)
+  return differences
+})
 const aiCounts = computed(() => manualAiCounts(result.value?.ai))
 const aiJudgments = computed(() => judgmentByItemId(result.value?.ai))
 const aiItems = computed(() => result.value?.ai?.inputBundle?.items ?? [])
@@ -186,6 +211,70 @@ async function downloadExcelReport() {
     setRunMessage(getErrorMessage(caught), 'error')
   } finally {
     downloadingExcel.value = false
+  }
+}
+
+async function downloadJsonResult() {
+  if (!result.value || !selectedRunId.value || downloadingJson.value) return
+  const confirmed = window.confirm('JSONには検査対象サイト由来の文章や一般的なメールアドレス・電話番号など、個人情報が含まれる可能性があります。自動マスキングは秘密情報の完全除去を保証しません。ダウンロードしますか？')
+  if (!confirmed) return
+  downloadingJson.value = true
+  try {
+    const response = await fetch(`/api/projects/${props.projectId}/runs/${selectedRunId.value}/export/json`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({})) as { statusMessage?: string }
+      throw new Error(error.statusMessage ?? 'JSON結果をダウンロードできませんでした。')
+    }
+    const url = URL.createObjectURL(await response.blob())
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `web-check-result-${selectedRunId.value}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    setRunMessage(activeResult.value ? '現在までに保存されたJSONスナップショットをダウンロードしました。' : 'JSON結果をダウンロードしました。', 'success')
+  } catch (caught) {
+    setRunMessage(getErrorMessage(caught), 'error')
+  } finally {
+    downloadingJson.value = false
+  }
+}
+
+function openRerunDialog() {
+  if (!canRerun.value) return
+  rerunConfigSource.value = 'current_project'
+  rerunAiMode.value = 'off'
+  confirmPaidApi.value = false
+  showRerunDialog.value = true
+}
+
+async function rerunAllUrls() {
+  if (!result.value || !canRerun.value) return
+  if (rerunAiMode.value === 'api' && !confirmPaidApi.value) {
+    return setRunMessage('APIモードでは有料実行の確認が必要です。', 'error')
+  }
+  rerunning.value = true
+  setRunMessage('', 'success')
+  try {
+    const started = await $fetch<{ runId: string; status: RunStatus }>(
+      `/api/projects/${props.projectId}/runs/${result.value.runId}/rerun`,
+      {
+        method: 'POST',
+        body: {
+          configSource: rerunConfigSource.value,
+          aiMode: rerunAiMode.value,
+          confirmPaidApi: confirmPaidApi.value,
+        },
+      },
+    )
+    showRerunDialog.value = false
+    selectedRunId.value = started.runId
+    await Promise.all([refreshHistory(), loadRun(started.runId)])
+    setRunMessage('現在のExcelを再読込し、全URLの再実行を開始しました。', 'success')
+  } catch (caught) {
+    setRunMessage(getErrorMessage(caught), 'error')
+    await refreshHistory().catch(() => undefined)
+  } finally {
+    rerunning.value = false
   }
 }
 
@@ -411,6 +500,7 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
               <span v-if="polling" class="polling-label">2秒ごとに更新中</span>
               <h3>{{ formatDate(result.createdAt) }} の検査</h3>
               <p class="run-id">runId: {{ result.runId }}</p>
+              <p v-if="result.rerunOfRunId" class="run-id">再実行元: {{ result.rerunOfRunId }}</p>
             </div>
             <div class="run-times">
               <span>開始 {{ formatDate(result.startedAt) }}</span>
@@ -423,6 +513,12 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
               >
                 {{ downloadingExcel ? 'Excel生成中…' : 'Excelレポートをダウンロード' }}
               </button>
+              <button class="button" type="button" :disabled="downloadingJson" @click="downloadJsonResult">
+                {{ downloadingJson ? 'JSON準備中…' : activeResult ? '現在までのJSONをダウンロード' : 'JSON結果をダウンロード' }}
+              </button>
+              <button class="button" type="button" :disabled="!canRerun" @click="openRerunDialog">
+                {{ rerunning ? '再実行準備中…' : '全URLを再実行' }}
+              </button>
               <button
                 v-if="activeResult"
                 class="button danger"
@@ -434,6 +530,48 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
               </button>
             </div>
           </div>
+
+          <p v-if="activeResult" class="hint">JSONダウンロードは、ダウンロード時点までに保存された途中結果のスナップショットです。</p>
+
+          <dialog v-if="showRerunDialog" open class="rerun-dialog" aria-labelledby="rerun-dialog-title">
+            <form method="dialog" class="stack" @submit.prevent="rerunAllUrls">
+              <div>
+                <p class="eyebrow">RERUN</p>
+                <h3 id="rerun-dialog-title">全URLを再実行</h3>
+                <p>現在登録されているExcelを再読込し、新しいrunIdで検査します。元runと入力Excelは変更しません。</p>
+              </div>
+              <fieldset>
+                <legend>検査条件</legend>
+                <label><input v-model="rerunConfigSource" type="radio" value="current_project"> 現在の案件設定</label>
+                <label><input v-model="rerunConfigSource" type="radio" value="source_run"> 過去runの設定スナップショット</label>
+              </fieldset>
+              <div class="rerun-differences">
+                <strong>過去runと現在設定の差分</strong>
+                <ul v-if="rerunDifferences.length"><li v-for="difference in rerunDifferences" :key="difference">{{ difference }}</li></ul>
+                <p v-else>比較可能な設定に差はありません。</p>
+              </div>
+              <p v-if="rerunConfigSource === 'source_run' && result.configSnapshot.authMode !== 'none'" class="notice">
+                認証情報とフォーム認証手順は現在の案件設定を使用します。認証モードが過去runと異なる場合は開始できません。
+              </p>
+              <p v-if="settings.auth.mode !== 'none' && !credentialsConfigured" class="notice error">現在の案件に認証情報が保存されていないため、再実行を開始できません。</p>
+              <fieldset>
+                <legend>AIリンク内容判定（初期値OFF）</legend>
+                <label><input v-model="rerunAiMode" type="radio" value="off"> OFF</label>
+                <label><input v-model="rerunAiMode" type="radio" value="manual"> MANUAL</label>
+                <label><input v-model="rerunAiMode" type="radio" value="api"> API</label>
+              </fieldset>
+              <div v-if="rerunAiMode === 'api'" class="notice warning">
+                <p>モデル: {{ settings.ai.model }}／料金上限: {{ settings.ai.costLimitUsd.toFixed(2) }} USD／APIキー: {{ aiConfig?.apiKeyConfigured ? '設定済み' : '未設定' }}</p>
+                <label><input v-model="confirmPaidApi" type="checkbox"> OpenAI API料金が発生する可能性を確認し、有料実行を許可します。</label>
+              </div>
+              <div class="button-row rerun-dialog-actions">
+                <button class="button" type="button" :disabled="rerunning" @click="showRerunDialog = false">閉じる</button>
+                <button class="button primary" type="submit" :disabled="rerunning || (settings.auth.mode !== 'none' && !credentialsConfigured) || (rerunAiMode === 'api' && (!confirmPaidApi || !aiConfig?.apiKeyConfigured))">
+                  {{ rerunning ? '開始準備中…' : '新しいrunで再実行' }}
+                </button>
+              </div>
+            </form>
+          </dialog>
 
           <p v-if="result.termination" class="notice">
             <strong>{{ result.termination.kind === 'canceled' ? 'キャンセル' : '異常終了からの復旧' }}:</strong>

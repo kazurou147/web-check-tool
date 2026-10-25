@@ -52,6 +52,7 @@ import {
 } from './playwright-inspector'
 import { ArchivedProjectError, type ProjectStore, useProjectStore } from './project-store'
 import { RunStore } from './run-store'
+import type { RerunRequest } from './validation'
 
 export class RunBusyError extends Error {}
 export class RunInputError extends Error {}
@@ -74,25 +75,81 @@ export interface RunEngineDependencies {
 export class RunEngine {
   constructor(private readonly dependencies: RunEngineDependencies) {}
 
-  async prepare(projectId: string): Promise<PreparedRun> {
-    const project = await this.dependencies.projectStore.get(projectId)
+  async prepare(projectId: string, rerun?: RerunRequest & { sourceRunId: string }): Promise<PreparedRun> {
+    const storedProject = await this.dependencies.projectStore.get(projectId)
+    const project = structuredClone(storedProject)
     if (project.archivedAt) throw new ArchivedProjectError('アーカイブ中の案件では検査を開始できません')
     if (!project.excelFileName) throw new RunInputError('Excelファイルが登録されていません')
+    let sourceRun: RunResult | undefined
+    let config = createRunConfig(project.settings)
+    const requestedAiMode = rerun?.aiMode ?? project.settings.ai.mode
+    if (rerun) {
+      sourceRun = await this.dependencies.runStore.get(projectId, rerun.sourceRunId)
+      if (isActiveRun(sourceRun.status)) throw new RunInputError('実行中の検査は再実行できません')
+      if (rerun.configSource === 'source_run') {
+        if (sourceRun.configSnapshot.authMode !== project.settings.auth.mode) {
+          throw new RunInputError('過去runと現在の認証モードが異なるため、過去runの条件では再実行できません')
+        }
+        config = {
+          ...config,
+          ...sourceRun.configSnapshot,
+          authMode: project.settings.auth.mode,
+          aiMode: requestedAiMode,
+          allowedPrivateHosts: [...(sourceRun.configSnapshot.allowedPrivateHosts ?? [])],
+          viewports: structuredClone(sourceRun.configSnapshot.viewports),
+        }
+        project.settings.pageConcurrency = config.pageConcurrency
+        project.settings.navigationTimeoutMs = config.navigationTimeoutMs
+        project.settings.allowedPrivateHosts = [...config.allowedPrivateHosts]
+      }
+      project.settings.ai.mode = requestedAiMode
+      config.aiMode = requestedAiMode
+    }
+    if (project.settings.auth.mode !== 'none' && !await this.dependencies.projectStore.vault.exists(projectId)) {
+      throw new RunInputError('現在の案件に認証情報が保存されていないため検査を開始できません')
+    }
+    if (rerun && project.settings.ai.mode === 'api') {
+      if (!rerun.confirmPaidApi) throw new RunInputError('APIモードでは有料実行の確認が必要です')
+      const apiKey = this.dependencies.openAiApiKey ? this.dependencies.openAiApiKey() : process.env.OPENAI_API_KEY
+      if (!apiKey?.trim()) {
+        throw new RunInputError('OPENAI_API_KEYが設定されていません')
+      }
+      if (!findMatchingAiPriceProfile(project.settings.ai.priceProfileId, project.settings.ai.model)) {
+        throw new RunInputError('選択中のモデルに対応する料金プロファイルがありません')
+      }
+      if (!(project.settings.ai.costLimitUsd > 0)) throw new RunInputError('API料金上限が設定されていません')
+    }
     const input = await readExcelInput(this.dependencies.projectStore.excelPath(projectId), project.excelFileName)
     if (!input.canStart) throw new RunInputError('Excel入力に致命的な問題があるため検査を開始できません')
     const secrets = project.settings.auth.mode === 'none'
       ? {}
       : await this.dependencies.projectStore.vault.read(projectId)
+    if (project.settings.auth.mode !== 'none' && !secrets[project.settings.auth.mode]) {
+      throw new RunInputError('現在の認証モードに対応する認証情報が保存されていません')
+    }
     const runId = randomUUID()
     const now = this.dependencies.now().toISOString()
     const result: RunResult = {
       schemaVersion: 1,
       runId,
       projectId,
+      ...(rerun ? {
+        rerunOfRunId: rerun.sourceRunId,
+        rerun: {
+          sourceRunId: rerun.sourceRunId,
+          configSource: rerun.configSource,
+          inputSource: 'current_excel' as const,
+          requestedAiMode,
+          requestedAt: now,
+          ...(rerun.configSource === 'source_run' && project.settings.auth.mode !== 'none'
+            ? { compatibilityWarnings: ['認証情報と認証手順は現在の案件設定を使用しています。'] }
+            : {}),
+        },
+      } : {}),
       status: 'queued',
       createdAt: now,
       updatedAt: now,
-      configSnapshot: createRunConfig(project.settings),
+      configSnapshot: config,
       input,
       summary: emptySummary(),
       pages: [],
@@ -121,6 +178,16 @@ export class RunEngine {
       },
     }
     await this.dependencies.runStore.create(projectId, runId, input, result)
+    if (rerun) {
+      await this.dependencies.runStore.appendEvent(projectId, runId, {
+        at: now,
+        type: 'run_rerun_created',
+        sourceRunId: rerun.sourceRunId,
+        configSource: rerun.configSource,
+        inputSource: 'current_excel',
+        aiMode: requestedAiMode,
+      })
+    }
     return { project, secrets, input, result }
   }
 
@@ -485,10 +552,18 @@ export class RunCoordinator {
   constructor(private readonly engine: RunEngine) {}
 
   async start(projectId: string): Promise<RunResult> {
+    return await this.launch(projectId)
+  }
+
+  async rerun(projectId: string, sourceRunId: string, request: RerunRequest): Promise<RunResult> {
+    return await this.launch(projectId, { ...request, sourceRunId })
+  }
+
+  private async launch(projectId: string, rerun?: RerunRequest & { sourceRunId: string }): Promise<RunResult> {
     if (this.active || this.starting) throw new RunBusyError('別の検査を実行中です')
     this.starting = true
     try {
-      const prepared = await this.engine.prepare(projectId)
+      const prepared = await this.engine.prepare(projectId, rerun)
       const controller = new AbortController()
       const handle: ActiveRunHandle = {
         projectId,

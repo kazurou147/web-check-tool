@@ -70,10 +70,15 @@ export function maskSensitiveUrl(value: string): MaskedValue {
 }
 
 export function maskSensitiveText(value: string): MaskedValue {
-  return maskSensitiveTextCore(value, true)
+  return maskSensitiveTextCore(value, true, true)
 }
 
-function maskSensitiveTextCore(value: string, maskUrls: boolean): MaskedValue {
+/** Result exports preserve ordinary contact details while masking secrets. */
+export function maskSecretText(value: string): MaskedValue {
+  return maskSensitiveTextCore(value, true, false)
+}
+
+function maskSensitiveTextCore(value: string, maskUrls: boolean, maskPersonal = true): MaskedValue {
   const tracker = createTracker()
   let output = value
 
@@ -86,8 +91,10 @@ function maskSensitiveTextCore(value: string, maskUrls: boolean): MaskedValue {
       return `${masked.value}${trailing}`
     })
   }
-  output = replace(output, /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, '[MASKED_EMAIL]', 'email', tracker)
-  output = replace(output, /(?:\+?\d[\d().\s-]{7,}\d)/gu, '[MASKED_PHONE]', 'phone', tracker)
+  if (maskPersonal) {
+    output = replace(output, /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, '[MASKED_EMAIL]', 'email', tracker)
+    output = replace(output, /(?:\+?\d[\d().\s-]{7,}\d)/gu, '[MASKED_PHONE]', 'phone', tracker)
+  }
   output = replace(output, /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gu, '[MASKED_JWT]', 'jwt', tracker)
   output = replace(output, /\b(?:sk-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{20,})\b/gu, '[MASKED_API_KEY]', 'api_key', tracker)
   output = replace(

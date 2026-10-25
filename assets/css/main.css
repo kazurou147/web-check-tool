@@ -136,6 +136,13 @@ th { color: var(--muted); font-size: .75rem; white-space: nowrap; }
 .ai-metrics strong { font-size: 1.25rem; }
 .ai-metrics span { color: var(--muted); font-size: .7rem; font-weight: 850; }
 .button-row { display: flex; gap: .6rem; flex-wrap: wrap; }
+.rerun-dialog { width: min(44rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow: auto; border: 1px solid var(--line); border-radius: 14px; padding: 1.25rem; box-shadow: 0 18px 60px #1f2d2540; }
+.rerun-dialog::backdrop { background: #18251d80; }
+.rerun-dialog fieldset { display: grid; gap: .55rem; border: 1px solid var(--line); border-radius: 10px; padding: .8rem; }
+.rerun-dialog legend { padding: 0 .35rem; font-weight: 850; }
+.rerun-differences { border-radius: 10px; padding: .8rem; background: #f1f4f1; }
+.rerun-differences p, .rerun-differences ul { margin-bottom: 0; }
+.rerun-dialog-actions { justify-content: flex-end; }
 .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; }
 .ai-detail-row { min-width: 0; }
 .ai-context { white-space: pre-wrap; overflow-wrap: anywhere; }

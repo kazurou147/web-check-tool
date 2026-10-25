@@ -73,3 +73,15 @@ export const projectMutationSchema = z.object({
 })
 
 export const projectIdSchema = z.uuid()
+
+export const rerunRequestSchema = z.object({
+  configSource: z.enum(['current_project', 'source_run']).default('current_project'),
+  aiMode: z.enum(['off', 'manual', 'api']).default('off'),
+  confirmPaidApi: z.boolean().default(false),
+}).strict().superRefine((value, context) => {
+  if (value.aiMode === 'api' && !value.confirmPaidApi) {
+    context.addIssue({ code: 'custom', path: ['confirmPaidApi'], message: 'APIモードでは有料実行の確認が必要です' })
+  }
+})
+
+export type RerunRequest = z.infer<typeof rerunRequestSchema>

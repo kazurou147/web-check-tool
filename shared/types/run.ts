@@ -196,6 +196,7 @@ export interface RunResult {
   runId: string
   projectId: string
   rerunOfRunId?: string
+  rerun?: RunRerunMetadata
   status: RunStatus
   createdAt: string
   startedAt?: string
@@ -223,8 +224,18 @@ export interface RunResult {
   fatalError?: SafeError
 }
 
+export interface RunRerunMetadata {
+  sourceRunId: string
+  configSource: 'current_project' | 'source_run'
+  inputSource: 'current_excel'
+  requestedAiMode: 'off' | 'manual' | 'api'
+  requestedAt: string
+  compatibilityWarnings?: string[]
+}
+
 export interface RunSummary {
   runId: string
+  rerunOfRunId?: string
   status: RunStatus
   createdAt: string
   startedAt?: string
@@ -235,4 +246,18 @@ export interface RunSummary {
   summary: RunResult['summary']
   termination?: RunTermination
   fatalError?: SafeError
+}
+
+export interface RunResultExport {
+  schemaVersion: 1
+  kind: 'web-check-result-export'
+  exportedAt: string
+  snapshot: { active: boolean; savedAt: string }
+  masking: {
+    ruleVersion: string
+    maskedCount: number
+    maskedCategories: string[]
+    notice: string
+  }
+  result: RunResult
 }

@@ -114,6 +114,8 @@ function getErrorMessage(caught: unknown): string {
         :project-id="projectId"
         :archived="Boolean(data.project.archivedAt)"
         :has-excel="Boolean(data.project.excelFileName)"
+        :settings="data.project.settings"
+        :credentials-configured="data.project.credentialsConfigured"
       />
     </template>
   </section>
