@@ -16,3 +16,4 @@ coverage/
 .test-data-*/
 .instance-lock/
 .ai-signing-key
+.url-identity-key
