@@ -199,12 +199,17 @@ export class RunEngine {
     const { project, secrets, input, result, urlIdentityKey } = prepared
     let inspector: WebsiteInspector | undefined
     let abortInspector: (() => void) | undefined
+    let inspectorClosing: Promise<void> | undefined
+    const closeInspector = (): Promise<void> => {
+      if (!inspectorClosing) inspectorClosing = inspector?.close() ?? Promise.resolve()
+      return inspectorClosing
+    }
     try {
       throwIfAborted(signal)
       await this.transition(result, 'reading_input', false, signal)
       await this.transition(result, 'authenticating', true, signal)
       inspector = await this.dependencies.inspectorFactory({ settings: project.settings, secrets, config: result.configSnapshot })
-      abortInspector = () => { void inspector?.close() }
+      abortInspector = () => { void closeInspector().catch(() => undefined) }
       signal?.addEventListener('abort', abortInspector, { once: true })
       throwIfAborted(signal)
       await inspector.authenticate(signal)
@@ -297,6 +302,7 @@ export class RunEngine {
         }
       }
       throwIfAborted(signal)
+      await closeInspector()
       result.status = 'completed'
       result.finishedAt = this.dependencies.now().toISOString()
       result.updatedAt = result.finishedAt
@@ -305,6 +311,7 @@ export class RunEngine {
       await this.event(result, 'run_completed')
       return result
     } catch (error) {
+      await closeInspector().catch(() => undefined)
       if (isAbortError(error) || signal?.aborted) {
         const finalizedAt = this.dependencies.now().toISOString()
         const previousStatus = isActiveRun(result.status) ? result.status as ActiveRunStatus : 'checking'
@@ -334,7 +341,7 @@ export class RunEngine {
       return result
     } finally {
       if (abortInspector) signal?.removeEventListener('abort', abortInspector)
-      await inspector?.close().catch(() => undefined)
+      await closeInspector().catch(() => undefined)
     }
   }
 

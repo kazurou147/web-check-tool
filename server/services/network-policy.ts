@@ -1,5 +1,6 @@
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
+import { domainToASCII } from 'node:url'
 
 export class NetworkPolicyError extends Error {
   readonly code = 'NETWORK_POLICY_BLOCKED'
@@ -10,6 +11,15 @@ export type DnsLookup = (hostname: string) => Promise<Array<{ address: string; f
 export interface NetworkPolicyOptions {
   allowedPrivateHosts?: string[]
   lookup?: DnsLookup
+}
+
+export interface ApprovedNetworkTarget {
+  url: URL
+  hostname: string
+  port: number
+  addresses: ReadonlyArray<{ address: string, family: 4 | 6 }>
+  selectedAddress: { address: string, family: 4 | 6 }
+  privateHostExplicitlyAllowed: boolean
 }
 
 export class NetworkPolicy {
@@ -24,6 +34,10 @@ export class NetworkPolicy {
   }
 
   async assertUrl(value: string): Promise<URL> {
+    return (await this.resolveUrl(value)).url
+  }
+
+  async resolveUrl(value: string): Promise<ApprovedNetworkTarget> {
     let url: URL
     try {
       url = new URL(value)
@@ -38,19 +52,42 @@ export class NetworkPolicy {
     }
 
     const hostname = normalizeHostname(url.hostname)
-    const addresses = isIP(hostname)
-      ? [{ address: hostname, family: isIP(hostname) }]
-      : await this.resolveHost(hostname)
+    let addresses: Array<{ address: string, family: number }>
+    try {
+      addresses = isIP(hostname)
+        ? [{ address: hostname, family: isIP(hostname) }]
+        : await this.resolveHost(hostname)
+    } catch {
+      throw new NetworkPolicyError('DNSでアクセス先を確認できません')
+    }
     if (addresses.length === 0) {
       throw new NetworkPolicyError('DNSでアクセス先を確認できません')
     }
-    if (!this.allowedPrivateHosts.has(hostname)) {
-      const blocked = addresses.find(entry => isBlockedAddress(entry.address))
-      if (blocked) {
-        throw new NetworkPolicyError(`ローカル・私設アドレスへのアクセスを拒否しました (${blocked.address})`)
-      }
+    const normalizedAddresses = [...new Map(addresses.map((entry) => {
+      const address = normalizeIpAddress(entry.address)
+      const family = isIP(address)
+      return [`${family}:${address}`, { address, family }]
+    })).values()]
+    if (normalizedAddresses.some(entry => entry.family !== 4 && entry.family !== 6)) {
+      throw new NetworkPolicyError('DNS応答に利用できないIPアドレスが含まれています')
     }
-    return url
+    const privateHostExplicitlyAllowed = this.allowedPrivateHosts.has(hostname)
+    const blockedCount = normalizedAddresses.filter(entry => isBlockedAddress(entry.address)).length
+    if (blockedCount > 0 && blockedCount < normalizedAddresses.length) {
+      throw new NetworkPolicyError('公開・非公開アドレスが混在するDNS応答を拒否しました')
+    }
+    if (blockedCount > 0 && !privateHostExplicitlyAllowed) {
+      throw new NetworkPolicyError('ローカル・私設アドレスへのアクセスを拒否しました')
+    }
+    const approved = normalizedAddresses as Array<{ address: string, family: 4 | 6 }>
+    return {
+      url,
+      hostname,
+      port: parsePort(url),
+      addresses: approved,
+      selectedAddress: approved[0]!,
+      privateHostExplicitlyAllowed,
+    }
   }
 }
 
@@ -106,5 +143,20 @@ function isBlockedIpv4(value: string): boolean {
 }
 
 function normalizeHostname(hostname: string): string {
-  return hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+  const value = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
+  if (isIP(value)) return normalizeIpAddress(value)
+  const ascii = domainToASCII(value)
+  return ascii || value
+}
+
+function normalizeIpAddress(address: string): string {
+  const value = address.toLowerCase().split('%')[0]!
+  if (isIP(value) === 6) return new URL(`http://[${value}]/`).hostname.replace(/^\[|\]$/g, '')
+  return value
+}
+
+function parsePort(url: URL): number {
+  const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80))
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new NetworkPolicyError('接続先ポートが不正です')
+  return port
 }

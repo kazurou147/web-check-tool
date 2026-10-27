@@ -2,11 +2,13 @@ import { chromium, devices, type Browser, type BrowserContext, type BrowserConte
 import type { ProjectSecrets, ProjectSettings } from '~/shared/types/project'
 import type { ImageDevice, ImageScrollDiagnostics, MobileEmulationSnapshot, SanitizedRunConfig } from '~/shared/types/run'
 import type { CapturedImage } from './checks/images'
-import type { CapturedLink, HttpProbeResult, LinkProbe } from './checks/links'
+import type { CapturedLink, LinkProbe } from './checks/links'
 import type { RenderedMetadata } from './checks/metadata'
 import type { TagNetworkObservation } from './checks/google-tags'
 import { NetworkPolicy, NetworkPolicyError } from './network-policy'
 import { isAbortError, RunCanceledError, throwIfAborted } from './abort'
+import { EgressProxy } from './egress-proxy'
+import { browserCookieProvider, EgressHttpClient } from './egress-http-client'
 
 export interface ImageViewportInspection {
   device: ImageDevice
@@ -114,28 +116,59 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
     private readonly secrets: ProjectSecrets,
     private readonly config: SanitizedRunConfig,
     private readonly policy: NetworkPolicy,
+    private readonly proxy: EgressProxy,
+    linkProbe: LinkProbe,
   ) {
     this.loginOrigin = settings.auth.loginUrl ? safeOrigin(settings.auth.loginUrl) : null
-    this.linkProbe = new ContextLinkProbe(context, policy, config)
+    this.linkProbe = linkProbe
   }
 
   static async create(settings: ProjectSettings, secrets: ProjectSecrets, config: SanitizedRunConfig): Promise<PlaywrightWebsiteInspector> {
-    const browser = await chromium.launch({ headless: true })
+    const policy = new NetworkPolicy({ allowedPrivateHosts: settings.allowedPrivateHosts })
+    const proxy = new EgressProxy({ policy, connectTimeoutMs: config.linkTimeoutMs, idleTimeoutMs: config.navigationTimeoutMs })
+    const endpoint = await proxy.start()
+    let browser: Browser | undefined
+    let context: BrowserContext | undefined
+    let mobileContext: BrowserContext | undefined
     const httpCredentials = settings.auth.mode === 'basic' && secrets.basic
       ? { username: secrets.basic.username, password: secrets.basic.password }
       : undefined
-    const context = await browser.newContext({
-      acceptDownloads: false,
-      serviceWorkers: 'block',
-      httpCredentials,
-      viewport: config.viewports.desktop,
-    })
-    const mobileContext = await browser.newContext(createMobileContextOptions(config, httpCredentials))
-    const policy = new NetworkPolicy({ allowedPrivateHosts: settings.allowedPrivateHosts })
-    const inspector = new PlaywrightWebsiteInspector(browser, context, mobileContext, settings, secrets, config, policy)
-    await inspector.installProtectedRoute(context)
-    await inspector.installProtectedRoute(mobileContext)
-    return inspector
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        proxy: { server: endpoint.server, bypass: '<-loopback>' },
+        args: [
+          '--proxy-bypass-list=<-loopback>',
+          '--disable-quic',
+          '--disable-features=WebTransport',
+          '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+        ],
+      })
+      context = await browser.newContext({
+        acceptDownloads: false,
+        serviceWorkers: 'block',
+        httpCredentials,
+        viewport: config.viewports.desktop,
+      })
+      mobileContext = await browser.newContext(createMobileContextOptions(config, httpCredentials))
+      const linkProbe = new EgressHttpClient({
+        proxy: endpoint,
+        config,
+        authorizeTarget: (url, method) => proxy.authorizeUrl(url, method),
+        cookieProvider: browserCookieProvider(context),
+        ...(httpCredentials ? { basicCredentials: httpCredentials } : {}),
+      })
+      const inspector = new PlaywrightWebsiteInspector(browser, context, mobileContext, settings, secrets, config, policy, proxy, linkProbe)
+      await inspector.hardenContext(context)
+      await inspector.hardenContext(mobileContext)
+      return inspector
+    } catch (error) {
+      await mobileContext?.close().catch(() => undefined)
+      await context?.close().catch(() => undefined)
+      await browser?.close().catch(() => undefined)
+      await proxy.stop().catch(() => undefined)
+      throw error
+    }
   }
 
   async authenticate(signal?: AbortSignal): Promise<void> {
@@ -166,7 +199,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       await this.mobileContext.close()
       throwIfAborted(signal)
       this.mobileContext = await this.browser.newContext(createMobileContextOptions(this.config, undefined, storageState))
-      await this.installProtectedRoute(this.mobileContext)
+      await this.hardenContext(this.mobileContext)
     } catch (error) {
       if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
       if (error instanceof PageInspectionError) throw error
@@ -190,6 +223,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
     await this.mobileContext.close().catch(() => undefined)
     await this.context.close().catch(() => undefined)
     await this.browser.close().catch(() => undefined)
+    await this.proxy.stop().catch(() => undefined)
   }
 
   private async inspectAttempt(url: string, attempt: number, signal?: AbortSignal): Promise<PageInspection> {
@@ -358,6 +392,16 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
     })
   }
 
+  private async hardenContext(context: BrowserContext): Promise<void> {
+    await context.addInitScript(() => {
+      const blocked = () => { throw new DOMException('通信方式がセキュリティポリシーにより無効化されています', 'SecurityError') }
+      for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'WebTransport']) {
+        try { Object.defineProperty(globalThis, name, { configurable: false, writable: false, value: blocked }) } catch { /* browser-defined non-configurable property */ }
+      }
+    })
+    await this.installProtectedRoute(context)
+  }
+
   private async assertRequestAllowed(request: Request): Promise<void> {
     const method = request.method().toUpperCase()
     const origin = safeOrigin(request.url())
@@ -369,66 +413,9 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       throw new NetworkPolicyError(`${method}リクエストを拒否しました`)
     }
     if (request.resourceType() === 'websocket') throw new NetworkPolicyError('WebSocket通信を拒否しました')
-    await this.policy.assertUrl(request.url())
+    await this.proxy.authorizeUrl(request.url(), method)
     if (redirectCount(request) > this.config.maxRedirects) {
       throw new NetworkPolicyError('リダイレクト回数が上限を超えました')
-    }
-  }
-}
-
-class ContextLinkProbe implements LinkProbe {
-  constructor(
-    private readonly context: BrowserContext,
-    private readonly policy: NetworkPolicy,
-    private readonly config: SanitizedRunConfig,
-  ) {}
-
-  async probe(value: string, includeBody: boolean, signal?: AbortSignal): Promise<HttpProbeResult> {
-    let current = value
-    let redirectCount = 0
-    while (true) {
-      throwIfAborted(signal)
-      await this.policy.assertUrl(current)
-      const response = await this.context.request.fetch(current, {
-        method: includeBody ? 'GET' : 'HEAD',
-        failOnStatusCode: false,
-        maxRedirects: 0,
-        timeout: this.config.linkTimeoutMs,
-        headers: { 'user-agent': 'WebsiteDeliveryChecker/1.0' },
-      })
-      try {
-        const location = response.headers()['location']
-        if (response.status() >= 300 && response.status() < 400 && location) {
-          if (redirectCount >= this.config.maxRedirects) {
-            throw new NetworkPolicyError(`リダイレクト回数が上限${this.config.maxRedirects}回を超えました`)
-          }
-          current = new URL(location, current).href
-          redirectCount += 1
-          continue
-        }
-        const length = Number(response.headers()['content-length'] ?? '0')
-        if (length > this.config.maxResponseBytes) {
-          throw new NetworkPolicyError(`応答サイズが上限${this.config.maxResponseBytes}バイトを超えています`)
-        }
-        let body: string | undefined
-        if (includeBody) {
-          const bytes = await response.body()
-          if (bytes.byteLength > this.config.maxResponseBytes) {
-            throw new NetworkPolicyError(`応答サイズが上限${this.config.maxResponseBytes}バイトを超えています`)
-          }
-          body = bytes.toString('utf8')
-        }
-        return {
-          requestedUrl: value,
-          finalUrl: response.url(),
-          status: response.status(),
-          contentType: response.headers()['content-type'] ?? '',
-          redirectCount,
-          body,
-        }
-      } finally {
-        await response.dispose()
-      }
     }
   }
 }
