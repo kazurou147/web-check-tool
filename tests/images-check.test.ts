@@ -15,6 +15,14 @@ describe('画像検査', () => {
     expect(results.every(item => item.device === device)).toBe(true)
   })
 
+  it('DOM抽出上限を超えた画像URLはNGと断定せず要確認にする', () => {
+    const result = checkImages('https://example.com/', 'desktop', [{
+      ...baseImage('data:image/png;base64,truncated'),
+      captureError: '画像URLが安全な抽出上限を超えたため未確認です。',
+    }], false)[0]!
+    expect(result).toMatchObject({ verdict: 'needs_review', message: '画像URLが安全な抽出上限を超えたため未確認です。' })
+  })
+
   it('レスポンシブCSSで非表示のlazy画像を十分な根拠がある場合だけ対象外にする', () => {
     const result = checkImages('https://example.com/', 'mobile', [{
       ...baseImage('https://example.com/sidebar.webp'),

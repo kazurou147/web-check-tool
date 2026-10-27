@@ -54,4 +54,35 @@ describe('リンク検査', () => {
 
     await expect(probe.probe('https://safe.example/', false)).rejects.toThrow('リダイレクト回数')
   })
+
+  it('通信の完了順が前後してもExcelのリンク順を維持する', async () => {
+    const probe: LinkProbe = {
+      probe: async (url) => {
+        const index = Number(new URL(url).pathname.slice(1))
+        await new Promise(resolve => setTimeout(resolve, (3 - index) * 5))
+        return { requestedUrl: url, finalUrl: url, status: 200, contentType: 'text/html', redirectCount: 0 }
+      },
+    }
+    const results = await checkLinks('https://example.com/', [1, 2, 3].map(index => ({
+      href: `/${index}`,
+      resolvedUrl: `https://example.com/${index}`,
+      text: String(index),
+      isImageLink: false,
+    })), new Set(), probe)
+
+    expect(results.map(item => item.href)).toEqual(['/1', '/2', '/3'])
+  })
+
+  it('DOM抽出上限を超えたURLは通信せず要確認にする', async () => {
+    let calls = 0
+    const results = await checkLinks('https://example.com/', [{
+      href: 'https://example.com/truncated',
+      resolvedUrl: 'https://example.com/truncated',
+      text: 'long',
+      isImageLink: false,
+      captureError: 'リンクURLが安全な抽出上限を超えたため未確認です。',
+    }], new Set(), { probe: async () => { calls += 1; throw new Error('not reached') } })
+    expect(results[0]).toMatchObject({ verdict: 'needs_review', kind: 'non_http' })
+    expect(calls).toBe(0)
+  })
 })

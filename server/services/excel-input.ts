@@ -1,4 +1,5 @@
 import ExcelJS, { type Cell, type Worksheet } from 'exceljs'
+import { readAndValidateXlsx, validateXlsxArchive } from './xlsx-security'
 import type {
   DuplicateExpectation,
   DuplicateUrlGroup,
@@ -18,11 +19,13 @@ const GOOGLE_TAG_ID_PATTERN = /\b(?:GTM-[A-Z0-9]+|G-[A-Z0-9]+|AW-\d+|GT-[A-Z0-9]
 
 export async function readExcelInput(filePath: string, sourceFileName: string): Promise<InputSnapshot> {
   const workbook = new ExcelJS.Workbook()
-  await workbook.xlsx.readFile(filePath)
+  const bytes = await readAndValidateXlsx(filePath)
+  await workbook.xlsx.load(bytes as unknown as ExcelJS.Buffer)
   return parseExcelWorkbook(workbook, sourceFileName)
 }
 
 export async function readExcelInputBuffer(buffer: ExcelJS.Buffer, sourceFileName = 'fixture.xlsx'): Promise<InputSnapshot> {
+  validateXlsxArchive(buffer as unknown as Uint8Array)
   const workbook = new ExcelJS.Workbook()
   await workbook.xlsx.load(buffer)
   return parseExcelWorkbook(workbook, sourceFileName)

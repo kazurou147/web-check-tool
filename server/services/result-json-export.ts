@@ -3,7 +3,9 @@ import { isActiveRun } from '~/shared/utils/run-display'
 import { AI_MASKING_NOTICE, AI_MASKING_RULE_VERSION, maskSecretText, maskSensitiveUrl } from './ai-masking'
 import type { RunStore } from './run-store'
 
-export const RESULT_JSON_EXPORT_MAX_BYTES = 50 * 1024 * 1024
+import { SECURITY_LIMITS } from '~/shared/security/security-constants'
+
+export const RESULT_JSON_EXPORT_MAX_BYTES = SECURITY_LIMITS.runResultHardBytes
 
 export class ResultExportTooLargeError extends Error {}
 

@@ -13,6 +13,7 @@ export interface CapturedImage {
   decoded: boolean | null
   visibility?: ImageVisibilityObservation
   networkError?: string
+  captureError?: string
 }
 
 export interface ImageVisibilityObservation {
@@ -73,6 +74,9 @@ function imageVerdict(
   timedOut: boolean,
 ): Pick<ImageResult, 'verdict' | 'message' | 'evidence' | 'exclusion'> {
   const stateEvidence = imageStateEvidence(image)
+  if (image.captureError) {
+    return { verdict: 'needs_review', message: image.captureError, evidence: stateEvidence }
+  }
   if (image.networkError) {
     return {
       verdict: 'ng',

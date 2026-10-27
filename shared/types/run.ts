@@ -68,7 +68,16 @@ export interface PageResult {
   httpStatus?: number
   findings: Finding[]
   imageViewportDiagnostics?: ImageViewportDiagnostics[]
+  limitDiagnostics?: CandidateLimitDiagnostic[]
   error?: SafeError
+}
+
+export interface CandidateLimitDiagnostic {
+  code: 'SECURITY_CANDIDATE_LIMIT_REACHED'
+  category: 'links' | 'images'
+  device?: ImageDevice
+  limit: number
+  observedAtLeast: number
 }
 
 export type GoogleTagDetectionMethod = 'html_direct' | 'gtm_delivered' | 'google_tag_delivered' | 'network'

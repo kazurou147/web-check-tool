@@ -30,8 +30,10 @@ import { manualAiCounts } from '~/shared/utils/manual-ai'
 import { maskUrlForDisplay } from '~/shared/security/url-security'
 import { maskSecretText } from './ai-masking'
 import { secureRunForPublic } from './persistence-security'
+import { SECURITY_ERROR_CODES, SECURITY_LIMITS, SecurityFoundationError } from '~/shared/security/security-constants'
 
 export class ExcelReportNotReadyError extends Error {}
+export class ExcelReportLimitError extends SecurityFoundationError {}
 
 export interface ExcelReportRow {
   url: string
@@ -69,6 +71,12 @@ type ExcelReportRowInput = Partial<ExcelReportRow> & {
 export async function buildExcelReport(project: Project, result: RunResult): Promise<Buffer> {
   assertReportableRun(result)
   const reportResult = secureRunForPublic(result)
+  const estimatedRows = reportResult.pages.reduce((sum, page) => sum + page.findings.length, 0)
+    + reportResult.links.length
+    + reportResult.images.length
+    + reportResult.googleTagDetections.length
+    + (reportResult.ai?.apiResult?.output.judgments.length ?? reportResult.ai?.manualResult?.output.judgments.length ?? 0)
+  assertExcelReportRowLimit(estimatedRows)
   const workbook = new ExcelJS.Workbook()
   workbook.creator = 'Webサイト納品前チェックツール'
   workbook.created = new Date(reportResult.createdAt)
@@ -82,6 +90,12 @@ export async function buildExcelReport(project: Project, result: RunResult): Pro
   buildDetailSheet(workbook, REPORT_SHEET_NAMES.all, REPORT_ALL_COLUMNS, allRows, false)
 
   return Buffer.from(await workbook.xlsx.writeBuffer())
+}
+
+export function assertExcelReportRowLimit(rowCount: number, limit = SECURITY_LIMITS.excelReportRows): void {
+  if (rowCount > limit) {
+    throw new ExcelReportLimitError(SECURITY_ERROR_CODES.reportTooLarge, `Excelレポートの行数が上限${limit}件を超えています。`)
+  }
 }
 
 export function assertReportableRun(result: RunResult): void {

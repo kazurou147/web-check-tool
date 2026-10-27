@@ -12,6 +12,7 @@ export interface CapturedLink {
   beforeText?: string
   afterText?: string
   isImageLink: boolean
+  captureError?: string
 }
 
 export interface LinkCheckOptions {
@@ -109,6 +110,7 @@ export async function checkLinks(
       isImageLink: link.isImageLink,
       evidence: [] as string[],
     }
+    if (link.captureError) return result(base, 'non_http', 'needs_review', link.captureError)
     if (!link.href) return result(base, 'empty', 'needs_review', 'hrefが空です。')
     if (/^mailto:/i.test(link.href)) {
       const valid = /^mailto:[^?\s@]+@[^?\s@]+(?:\?.*)?$/i.test(link.href)

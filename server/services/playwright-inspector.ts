@@ -9,6 +9,7 @@ import { NetworkPolicy, NetworkPolicyError } from './network-policy'
 import { isAbortError, RunCanceledError, throwIfAborted } from './abort'
 import { EgressProxy } from './egress-proxy'
 import { browserCookieProvider, EgressHttpClient } from './egress-http-client'
+import { SECURITY_ERROR_CODES, SECURITY_LIMITS } from '~/shared/security/security-constants'
 
 export interface ImageViewportInspection {
   device: ImageDevice
@@ -16,6 +17,7 @@ export interface ImageViewportInspection {
   timedOut: boolean
   scroll?: ImageScrollDiagnostics
   error?: string
+  candidateLimit?: { limit: number; observedAtLeast: number }
 }
 
 export const MOBILE_DEVICE_PROFILE_NAME = 'Pixel 5' as const
@@ -70,6 +72,7 @@ export interface PageInspection {
   anchorTargets: string[]
   networkTags: TagNetworkObservation[]
   images: ImageViewportInspection[]
+  linkCandidateLimit?: { limit: number; observedAtLeast: number }
 }
 
 export interface WebsiteInspector {
@@ -241,15 +244,19 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       networkTags.push({ url: event.request.url, initiatorUrls: collectInitiatorUrls(event.initiator) })
     })
     page.on('requestfailed', request => {
-      if (request.resourceType() === 'image') imageFailures.set(request.url(), request.failure()?.errorText ?? '通信失敗')
+      if (request.resourceType() === 'image' && (imageFailures.has(request.url()) || imageFailures.size < SECURITY_LIMITS.imageCandidatesPerDevice)) {
+        imageFailures.set(request.url(), request.failure()?.errorText ?? '通信失敗')
+      }
     })
     page.on('response', response => {
       const length = Number(response.headers()['content-length'] ?? '0')
       if (response.request().isNavigationRequest() && length > this.config.maxResponseBytes) mainResponseOversized = true
       if (response.request().resourceType() === 'image') {
-        if (length > this.config.maxResponseBytes) imageFailures.set(response.url(), '画像の応答サイズが上限を超えました')
-        else if (response.status() >= 400) imageFailures.set(response.url(), `HTTP ${response.status()}`)
-        else imageSuccesses.add(response.url())
+        if (length > this.config.maxResponseBytes) {
+          if (imageFailures.has(response.url()) || imageFailures.size < SECURITY_LIMITS.imageCandidatesPerDevice) imageFailures.set(response.url(), '画像の応答サイズが上限を超えました')
+        } else if (response.status() >= 400) {
+          if (imageFailures.has(response.url()) || imageFailures.size < SECURITY_LIMITS.imageCandidatesPerDevice) imageFailures.set(response.url(), `HTTP ${response.status()}`)
+        } else if (imageSuccesses.has(response.url()) || imageSuccesses.size < SECURITY_LIMITS.imageCandidatesPerDevice) imageSuccesses.add(response.url())
       }
     })
 
@@ -278,7 +285,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       const rawHtml = rawBody.toString('utf8')
       const renderedHtml = (await page.content()).slice(0, this.config.maxResponseBytes)
       const metadata = await captureMetadata(page)
-      const links = await captureLinks(page, (this.settings.ai?.mode ?? 'off') !== 'off')
+      const capturedLinks = await captureLinks(page, (this.settings.ai?.mode ?? 'off') !== 'off')
       const anchorTargets = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[id], a[name]')]
         .flatMap(element => [element.id, element.getAttribute('name') ?? ''])
         .filter(Boolean))
@@ -294,7 +301,8 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         rawHtml,
         renderedHtml,
         metadata,
-        links,
+        links: capturedLinks.items,
+        ...(capturedLinks.truncated ? { linkCandidateLimit: { limit: SECURITY_LIMITS.linkCandidatesPerPage, observedAtLeast: capturedLinks.observedAtLeast } } : {}),
         anchorTargets,
         networkTags,
         images: [desktopImages, mobileImages],
@@ -312,14 +320,18 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
     const failures = new Map<string, string>()
     const successes = new Set<string>()
     page.on('requestfailed', request => {
-      if (request.resourceType() === 'image') failures.set(request.url(), request.failure()?.errorText ?? '通信失敗')
+      if (request.resourceType() === 'image' && (failures.has(request.url()) || failures.size < SECURITY_LIMITS.imageCandidatesPerDevice)) {
+        failures.set(request.url(), request.failure()?.errorText ?? '通信失敗')
+      }
     })
     page.on('response', response => {
       if (response.request().resourceType() === 'image') {
         const length = Number(response.headers()['content-length'] ?? '0')
-        if (length > this.config.maxResponseBytes) failures.set(response.url(), '画像の応答サイズが上限を超えました')
-        else if (response.status() >= 400) failures.set(response.url(), `HTTP ${response.status()}`)
-        else successes.add(response.url())
+        if (length > this.config.maxResponseBytes) {
+          if (failures.has(response.url()) || failures.size < SECURITY_LIMITS.imageCandidatesPerDevice) failures.set(response.url(), '画像の応答サイズが上限を超えました')
+        } else if (response.status() >= 400) {
+          if (failures.has(response.url()) || failures.size < SECURITY_LIMITS.imageCandidatesPerDevice) failures.set(response.url(), `HTTP ${response.status()}`)
+        } else if (successes.has(response.url()) || successes.size < SECURITY_LIMITS.imageCandidatesPerDevice) successes.add(response.url())
       }
     })
     try {
@@ -368,7 +380,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
     throwIfAborted(signal)
     const captured = await captureImages(page)
     throwIfAborted(signal)
-    for (const image of captured) {
+    for (const image of captured.items) {
       const failure = failures.get(image.imageUrl)
       if (failure) image.networkError = failure
       else if (successes.has(image.imageUrl) && image.decoded === null) {
@@ -377,7 +389,13 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         image.decoded = true
       }
     }
-    return { device, images: captured, timedOut: scroll.stopReason === 'time_limit', scroll }
+    return {
+      device,
+      images: captured.items,
+      timedOut: scroll.stopReason === 'time_limit',
+      scroll,
+      ...(captured.truncated ? { candidateLimit: { limit: SECURITY_LIMITS.imageCandidatesPerDevice, observedAtLeast: captured.observedAtLeast } } : {}),
+    }
   }
 
   private async installProtectedRoute(context: BrowserContext): Promise<void> {
@@ -538,42 +556,49 @@ async function captureMetadata(page: Page): Promise<RenderedMetadata> {
   }))
 }
 
-async function captureLinks(page: Page, includeAiContext: boolean): Promise<CapturedLink[]> {
-  return page.evaluate((includeAiContext) => {
+async function captureLinks(page: Page, includeAiContext: boolean): Promise<{ items: CapturedLink[]; truncated: boolean; observedAtLeast: number }> {
+  return page.evaluate(({ includeAiContext, maximum }) => {
     const body = document.body
-    const limit = (value: string, side: 'start' | 'end') => {
+    const limit = (value: string, maximumCharacters: number, side: 'start' | 'end') => {
       const characters = Array.from(value)
-      return (side === 'start' ? characters.slice(0, 200) : characters.slice(-200)).join('')
+      return (side === 'start' ? characters.slice(0, maximumCharacters) : characters.slice(-maximumCharacters)).join('')
     }
-    return [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].map(anchor => {
+    const anchors = document.querySelectorAll<HTMLAnchorElement>('a[href]')
+    const items = Array.from({ length: Math.min(anchors.length, maximum) }, (_, index) => anchors[index]!).map(anchor => {
       let beforeText = ''
       let afterText = ''
       if (includeAiContext && body && body.contains(anchor)) {
         const before = document.createRange()
         before.selectNodeContents(body)
         before.setEndBefore(anchor)
-        beforeText = limit(before.toString(), 'end')
+        beforeText = limit(before.toString(), 200, 'end')
         const after = document.createRange()
         after.selectNodeContents(body)
         after.setStartAfter(anchor)
-        afterText = limit(after.toString(), 'start')
+        afterText = limit(after.toString(), 200, 'start')
       }
+      const href = anchor.getAttribute('href') ?? ''
+      const resolvedUrl = anchor.href
+      const urlTooLong = href.length > 8_192 || resolvedUrl.length > 8_192
       return {
-        href: anchor.getAttribute('href') ?? '',
-        resolvedUrl: anchor.href,
-        text: anchor.textContent ?? '',
+        href: href.slice(0, 8_192),
+        resolvedUrl: resolvedUrl.slice(0, 8_192),
+        text: limit(anchor.textContent ?? '', 10_000, 'start'),
         beforeText,
         afterText,
         isImageLink: Boolean(anchor.querySelector('img, picture, svg')),
+        ...(urlTooLong ? { captureError: 'リンクURLが安全な抽出上限を超えたため未確認です。' } : {}),
       }
     })
-  }, includeAiContext)
+    return { items, truncated: anchors.length > maximum, observedAtLeast: Math.min(anchors.length, maximum + 1) }
+  }, { includeAiContext, maximum: SECURITY_LIMITS.linkCandidatesPerPage })
 }
 
-async function captureImages(page: Page): Promise<CapturedImage[]> {
-  return page.evaluate(async () => {
+async function captureImages(page: Page): Promise<{ items: CapturedImage[]; truncated: boolean; observedAtLeast: number }> {
+  return page.evaluate(async (maximum) => {
     type Item = CapturedImage
     const output: Item[] = []
+    let truncated = false
     const seen = new Set<string>()
     const location = (element: Element): string => {
       const parts: string[] = []
@@ -588,9 +613,16 @@ async function captureImages(page: Page): Promise<CapturedImage[]> {
       return parts.join(' > ')
     }
     const add = (item: Item) => {
+      if (item.imageUrl.length > 8_192) {
+        item.imageUrl = item.imageUrl.slice(0, 8_192)
+        item.currentSrc = item.currentSrc?.slice(0, 8_192)
+        item.captureError = '画像URLが安全な抽出上限を超えたため未確認です。'
+      }
+      item.location = item.location.slice(0, 4_096)
       const key = `${item.imageUrl}|${item.sourceKind}|${item.location}`
       if (!item.imageUrl || seen.has(key)) return
       seen.add(key)
+      if (output.length >= maximum) { truncated = true; return }
       output.push(item)
     }
     type ResponsiveHideRule = {
@@ -729,6 +761,7 @@ async function captureImages(page: Page): Promise<CapturedImage[]> {
       }
     }
     for (const image of document.querySelectorAll<HTMLImageElement>('img')) {
+      if (truncated) break
       const sourceKind = image.closest('picture')
         ? 'picture'
         : image.srcset ? 'srcset' : 'img'
@@ -746,6 +779,7 @@ async function captureImages(page: Page): Promise<CapturedImage[]> {
     }
     const cssUrls = (value: string): string[] => [...value.matchAll(/url\(["']?([^"')]+)["']?\)/gi)].map(match => match[1]!)
     for (const element of document.querySelectorAll<HTMLElement>('body *')) {
+      if (truncated) break
       const normal = getComputedStyle(element)
       for (const url of cssUrls(normal.backgroundImage)) {
         add({ imageUrl: new URL(url, document.baseURI).href, sourceKind: 'css_background', location: location(element), complete: null, naturalWidth: null, decoded: null })
@@ -770,8 +804,8 @@ async function captureImages(page: Page): Promise<CapturedImage[]> {
       item.naturalWidth = probe.naturalWidth
       item.decoded = loaded && probe.naturalWidth > 0
     }))
-    return output
-  })
+    return { items: output, truncated, observedAtLeast: output.length + (truncated ? 1 : 0) }
+  }, SECURITY_LIMITS.imageCandidatesPerDevice)
 }
 
 function redirectCount(request: Request): number {

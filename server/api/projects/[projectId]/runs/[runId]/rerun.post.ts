@@ -16,7 +16,7 @@ export default defineEventHandler(async (event) => {
     return { runId: result.runId, status: result.status, rerunOfRunId: runId }
   } catch (error) {
     if (error instanceof RunBusyError || error instanceof RunInputError) {
-      throw createError({ statusCode: 409, statusMessage: error.message })
+      throw createError({ statusCode: 409, statusMessage: error.message, ...(error instanceof RunInputError ? { data: { code: error.code } } : {}) })
     }
     if (error instanceof RunNotFoundError) {
       throw createError({ statusCode: 404, statusMessage: '指定された案件の検査結果が見つかりません' })

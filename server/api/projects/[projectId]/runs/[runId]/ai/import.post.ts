@@ -10,13 +10,21 @@ import { requireProjectId, requireRunId } from '~/server/services/request'
 import { RunNotFoundError } from '~/server/services/run-store'
 import { useRunStore } from '~/server/services/run-engine'
 import { secureRunForPublic } from '~/server/services/persistence-security'
+import { SECURITY_LIMITS, SecurityFoundationError } from '~/shared/security/security-constants'
+import { readLimitedMultipartFormData } from '~/server/services/request-body-limits'
 
 const ACCEPTED_TYPES = new Set(['application/json', 'text/json', 'application/octet-stream'])
 
 export default defineEventHandler(async (event) => {
   const projectId = requireProjectId(event)
   const runId = requireRunId(event)
-  const parts = await readMultipartFormData(event)
+  let parts
+  try {
+    parts = await readLimitedMultipartFormData(event, SECURITY_LIMITS.aiResultUploadBytes)
+  } catch (error) {
+    if (error instanceof SecurityFoundationError) throw createError({ statusCode: 413, statusMessage: error.message, data: { code: error.code } })
+    throw error
+  }
   const files = parts?.filter(part => part.name === 'file' && part.filename) ?? []
   if (files.length !== 1 || !files[0]?.filename) {
     throw createError({ statusCode: 400, statusMessage: 'AI判定結果JSONを1ファイル選択してください。' })

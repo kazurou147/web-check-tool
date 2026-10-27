@@ -4,9 +4,10 @@ import type { AiInputBundle, AiOutputBundle } from '~/shared/types/ai'
 import type { RunResult } from '~/shared/types/run'
 import { loadOrCreateAiSigningKey, stableStringify, verifyAiInputBundle } from './ai-input'
 import type { RunStore } from './run-store'
+import { SECURITY_LIMITS } from '~/shared/security/security-constants'
 
 export const AI_INPUT_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
-export const AI_OUTPUT_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
+export const AI_OUTPUT_UPLOAD_MAX_BYTES = SECURITY_LIMITS.aiResultUploadBytes
 export const AI_REASON_MAX_LENGTH = 500
 
 const reasonSchema = z.string().min(1).refine(

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { isIP } from 'node:net'
@@ -8,6 +9,7 @@ import type { HttpProbeResult, LinkProbe } from './checks/links'
 import { NetworkPolicyError } from './network-policy'
 import { throwIfAborted } from './abort'
 import type { EgressProxyEndpoint } from './egress-proxy'
+import { SECURITY_LIMITS } from '~/shared/security/security-constants'
 
 export interface EgressHttpClientOptions {
   proxy: EgressProxyEndpoint
@@ -18,9 +20,28 @@ export interface EgressHttpClientOptions {
 }
 
 export class EgressHttpClient implements LinkProbe {
+  private readonly limiter = new LinkRequestLimiter(
+    SECURITY_LIMITS.linkRequestConcurrencyPerRun,
+    SECURITY_LIMITS.linkRequestConcurrencyPerOrigin,
+  )
+  private readonly probes = new Map<string, Promise<HttpProbeResult>>()
+
   constructor(private readonly options: EgressHttpClientOptions) {}
 
   async probe(value: string, includeBody: boolean, signal?: AbortSignal): Promise<HttpProbeResult> {
+    throwIfAborted(signal)
+    const normalized = new URL(value)
+    normalized.hash = ''
+    const authScope = await this.authScope(normalized.href)
+    const cacheKey = `${includeBody ? 'GET' : 'HEAD'}|${normalized.href}|${authScope}`
+    const existing = this.probes.get(cacheKey)
+    if (existing) return await existing
+    const pending = this.probeUncached(normalized.href, includeBody, signal)
+    this.probes.set(cacheKey, pending)
+    return await pending
+  }
+
+  private async probeUncached(value: string, includeBody: boolean, signal?: AbortSignal): Promise<HttpProbeResult> {
     let current = value
     let redirects = 0
     let method: 'HEAD' | 'GET' = includeBody ? 'GET' : 'HEAD'
@@ -55,41 +76,53 @@ export class EgressHttpClient implements LinkProbe {
   private async requestOnce(value: string, method: 'HEAD' | 'GET', readBody: boolean, signal?: AbortSignal): Promise<{ status: number, headers: IncomingHttpHeaders, body?: string }> {
     const target = new URL(value)
     if (!['http:', 'https:'].includes(target.protocol)) throw new NetworkPolicyError('HTTP/HTTPS以外のURLは取得できません')
-    await this.options.authorizeTarget(target.href, method)
-    const timeoutSignal = AbortSignal.timeout(this.options.config.linkTimeoutMs)
-    const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
-    const headers: Record<string, string> = {
-      host: target.host,
-      connection: 'close',
-      'user-agent': 'WebsiteDeliveryChecker/1.0',
+    const release = await this.limiter.acquire(target.origin, signal)
+    try {
+      await this.options.authorizeTarget(target.href, method)
+      const timeoutSignal = AbortSignal.timeout(this.options.config.linkTimeoutMs)
+      const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+      const headers: Record<string, string> = {
+        host: target.host,
+        connection: 'close',
+        'user-agent': 'WebsiteDeliveryChecker/1.0',
+      }
+      const cookie = await this.options.cookieProvider?.(target.href)
+      if (cookie) headers.cookie = cookie
+      if (this.options.basicCredentials) {
+        headers.authorization = `Basic ${Buffer.from(`${this.options.basicCredentials.username}:${this.options.basicCredentials.password}`).toString('base64')}`
+      }
+      const response = target.protocol === 'http:'
+        ? await this.requestHttp(target, method, headers, requestSignal)
+        : await this.requestHttps(target, method, headers, requestSignal)
+      if (header(response.headers, 'x-web-check-proxy-error')) {
+        response.destroy()
+        throw new NetworkPolicyError('安全な通信経路で接続先が拒否されました')
+      }
+      const declaredLength = Number(header(response.headers, 'content-length') ?? '0')
+      if (declaredLength > this.options.config.maxResponseBytes) {
+        response.destroy()
+        throw new NetworkPolicyError(`応答サイズが上限${this.options.config.maxResponseBytes}バイトを超えています`)
+      }
+      if (!readBody) {
+        await drainLimited(response, this.options.config.maxResponseBytes, requestSignal)
+        return { status: response.statusCode ?? 0, headers: response.headers }
+      }
+      return {
+        status: response.statusCode ?? 0,
+        headers: response.headers,
+        body: await readLimited(response, this.options.config.maxResponseBytes, requestSignal),
+      }
+    } finally {
+      release()
     }
-    const cookie = await this.options.cookieProvider?.(target.href)
-    if (cookie) headers.cookie = cookie
-    if (this.options.basicCredentials) {
-      headers.authorization = `Basic ${Buffer.from(`${this.options.basicCredentials.username}:${this.options.basicCredentials.password}`).toString('base64')}`
-    }
-    const response = target.protocol === 'http:'
-      ? await this.requestHttp(target, method, headers, requestSignal)
-      : await this.requestHttps(target, method, headers, requestSignal)
-    if (header(response.headers, 'x-web-check-proxy-error')) {
-      response.destroy()
-      throw new NetworkPolicyError('安全な通信経路で接続先が拒否されました')
-    }
-    const declaredLength = Number(header(response.headers, 'content-length') ?? '0')
-    if (declaredLength > this.options.config.maxResponseBytes) {
-      response.destroy()
-      throw new NetworkPolicyError(`応答サイズが上限${this.options.config.maxResponseBytes}バイトを超えています`)
-    }
-    if (!readBody) {
-      if (method === 'GET') await drainLimited(response, this.options.config.maxResponseBytes, requestSignal)
-      else response.resume()
-      return { status: response.statusCode ?? 0, headers: response.headers }
-    }
-    return {
-      status: response.statusCode ?? 0,
-      headers: response.headers,
-      body: await readLimited(response, this.options.config.maxResponseBytes, requestSignal),
-    }
+  }
+
+  private async authScope(url: string): Promise<string> {
+    const cookie = await this.options.cookieProvider?.(url) ?? ''
+    const basic = this.options.basicCredentials
+      ? `${this.options.basicCredentials.username}\0${this.options.basicCredentials.password}`
+      : ''
+    return createHash('sha256').update(`${cookie}\0${basic}`).digest('hex')
   }
 
   private requestHttp(target: URL, method: string, headers: Record<string, string>, signal: AbortSignal): Promise<IncomingMessage> {
@@ -157,6 +190,63 @@ export class EgressHttpClient implements LinkProbe {
       connect.once('error', reject)
       connect.end()
     })
+  }
+}
+
+interface PendingPermit {
+  origin: string
+  signal?: AbortSignal
+  resolve: (release: () => void) => void
+  reject: (error: unknown) => void
+  abort?: () => void
+}
+
+export class LinkRequestLimiter {
+  private active = 0
+  private readonly activeByOrigin = new Map<string, number>()
+  private readonly queue: PendingPermit[] = []
+
+  constructor(
+    readonly maxTotal: number = SECURITY_LIMITS.linkRequestConcurrencyPerRun,
+    readonly maxPerOrigin: number = SECURITY_LIMITS.linkRequestConcurrencyPerOrigin,
+  ) {}
+
+  acquire(origin: string, signal?: AbortSignal): Promise<() => void> {
+    throwIfAborted(signal)
+    return new Promise((resolve, reject) => {
+      const pending: PendingPermit = { origin, signal, resolve, reject }
+      if (signal) {
+        pending.abort = () => {
+          const index = this.queue.indexOf(pending)
+          if (index >= 0) this.queue.splice(index, 1)
+          reject(signal.reason ?? new DOMException('通信が中断されました', 'AbortError'))
+        }
+        signal.addEventListener('abort', pending.abort, { once: true })
+      }
+      this.queue.push(pending)
+      this.schedule()
+    })
+  }
+
+  private schedule(): void {
+    while (this.active < this.maxTotal) {
+      const index = this.queue.findIndex(item => !item.signal?.aborted && (this.activeByOrigin.get(item.origin) ?? 0) < this.maxPerOrigin)
+      if (index < 0) return
+      const pending = this.queue.splice(index, 1)[0]!
+      if (pending.abort) pending.signal?.removeEventListener('abort', pending.abort)
+      this.active += 1
+      this.activeByOrigin.set(pending.origin, (this.activeByOrigin.get(pending.origin) ?? 0) + 1)
+      let released = false
+      pending.resolve(() => {
+        if (released) return
+        released = true
+        this.active -= 1
+        const remaining = (this.activeByOrigin.get(pending.origin) ?? 1) - 1
+        if (remaining <= 0) this.activeByOrigin.delete(pending.origin)
+        else this.activeByOrigin.set(pending.origin, remaining)
+        this.schedule()
+      })
+    }
   }
 }
 

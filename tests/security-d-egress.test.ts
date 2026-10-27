@@ -124,6 +124,53 @@ describe('Security-D egress proxy', () => {
     await expect(pending).rejects.toBeDefined()
   })
 
+  it('run全体で同一URL通信を共有し、認証状態が変わる場合は共有しない', async () => {
+    let requests = 0
+    let authState = 'session=first'
+    const fixture = await startHttpFixture((_request, response) => {
+      requests += 1
+      setTimeout(() => response.writeHead(200).end(), 20)
+    })
+    const proxy = await startProxy(fixture.port)
+    const client = new EgressHttpClient({
+      proxy: proxy.endpoint,
+      config: createRunConfig(defaultProjectSettings()),
+      authorizeTarget: (url, method) => proxy.proxy.authorizeUrl(url, method),
+      cookieProvider: async () => authState,
+    })
+    const url = `http://safe.test:${fixture.port}/same`
+    const results = await Promise.all([client.probe(url, false), client.probe(url, false), client.probe(url, false)])
+    expect(results.map(item => item.status)).toEqual([200, 200, 200])
+    expect(requests).toBe(1)
+
+    authState = 'session=second'
+    await expect(client.probe(url, false)).resolves.toMatchObject({ status: 200 })
+    expect(requests).toBe(2)
+  })
+
+  it('Content-Lengthがない巨大応答も読み取り途中で停止し、後続通信を継続できる', async () => {
+    const fixture = await startHttpFixture((request, response) => {
+      if (request.url === '/large') {
+        response.writeHead(200, { 'content-type': 'text/html' })
+        response.write('a'.repeat(800))
+        response.end('b'.repeat(800))
+        return
+      }
+      response.writeHead(200, { 'content-type': 'text/html' }).end('ok')
+    })
+    const proxy = await startProxy(fixture.port)
+    const config = createRunConfig(defaultProjectSettings())
+    config.maxResponseBytes = 1_024
+    const client = new EgressHttpClient({
+      proxy: proxy.endpoint,
+      config,
+      authorizeTarget: (url, method) => proxy.proxy.authorizeUrl(url, method),
+    })
+
+    await expect(client.probe(`http://safe.test:${fixture.port}/large`, true)).rejects.toThrow('応答サイズ')
+    await expect(client.probe(`http://safe.test:${fixture.port}/ok`, true)).resolves.toMatchObject({ status: 200, body: 'ok' })
+  })
+
   it('リダイレクト先を再検証し、禁止IPへ変化したDNS応答を拒否する', async () => {
     const fixture = await startHttpFixture((_request, response) => response.writeHead(302, { location: 'http://blocked.test/private' }).end())
     const proxy = await startProxy(fixture.port)
@@ -168,6 +215,29 @@ describe('Security-D egress proxy', () => {
       expect(result.metadata.titles).toEqual(['blocked/blocked'])
       expect(result.images.map(item => item.device)).toEqual(['desktop', 'mobile'])
       expect(hits).toEqual(expect.arrayContaining(['/style.css', '/script.js', '/frame', '/image.svg']))
+    } finally {
+      await inspector.close()
+    }
+  }, 30_000)
+
+  it('ページ・端末ごとのリンクと画像候補を2000件で止め、残りを診断する', async () => {
+    const fixture = await startHttpFixture((_request, response) => {
+      const links = Array.from({ length: 2_001 }, (_, index) => `<a href="/link-${index}">link ${index}</a>`).join('')
+      const images = Array.from({ length: 2_001 }, (_, index) => `<img id="image-${index}" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/%3E">`).join('')
+      response.writeHead(200, { 'content-type': 'text/html' }).end(`<title>limits</title>${links}${images}`)
+    })
+    const settings = defaultProjectSettings()
+    settings.allowedPrivateHosts = ['127.0.0.1']
+    const inspector = await createPlaywrightInspector({ settings, secrets: {}, config: fastConfig(settings) })
+    try {
+      const result = await inspector.inspect(`http://127.0.0.1:${fixture.port}/`)
+      expect(result.links).toHaveLength(2_000)
+      expect(result.linkCandidateLimit).toEqual({ limit: 2_000, observedAtLeast: 2_001 })
+      expect(result.images).toHaveLength(2)
+      expect(result.images[0]?.images).toHaveLength(2_000)
+      expect(result.images[0]?.candidateLimit).toEqual({ limit: 2_000, observedAtLeast: 2_001 })
+      expect(result.images[1]?.images).toHaveLength(2_000)
+      expect(result.images[1]?.candidateLimit).toEqual({ limit: 2_000, observedAtLeast: 2_001 })
     } finally {
       await inspector.close()
     }

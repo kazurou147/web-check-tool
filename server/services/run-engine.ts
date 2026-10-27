@@ -51,13 +51,16 @@ import {
   type WebsiteInspector,
 } from './playwright-inspector'
 import { ArchivedProjectError, type ProjectStore, useProjectStore } from './project-store'
-import { RunStore } from './run-store'
+import { assertRunResultSize, RunEventSizeError, RunStore } from './run-store'
 import type { RerunRequest } from './validation'
 import { createUrlIdentity, initializeUrlIdentityKey } from './url-identity'
 import { hydrateProjectAuthUrls } from './project-url-security'
+import { SECURITY_ERROR_CODES, SECURITY_LIMITS, SecurityFoundationError } from '~/shared/security/security-constants'
 
 export class RunBusyError extends Error {}
-export class RunInputError extends Error {}
+export class RunInputError extends Error {
+  constructor(message: string, readonly code = 'INPUT_ERROR') { super(message) }
+}
 export class RunCancelConflictError extends Error {}
 
 export type LinkProbeFactory = (settings: ProjectSettings, config: SanitizedRunConfig) => LinkProbe
@@ -123,6 +126,9 @@ export class RunEngine {
     }
     const input = await readExcelInput(this.dependencies.projectStore.excelPath(projectId), project.excelFileName)
     if (!input.canStart) throw new RunInputError('Excel入力に致命的な問題があるため検査を開始できません')
+    if (input.uniqueUrlCount > SECURITY_LIMITS.uniquePagesPerRun) {
+      throw new RunInputError(`固有ページ数は${SECURITY_LIMITS.uniquePagesPerRun}件以下にしてください`, SECURITY_ERROR_CODES.pageLimitReached)
+    }
     const secrets = project.settings.auth.mode === 'none'
       ? {}
       : await this.dependencies.projectStore.vault.read(projectId)
@@ -236,7 +242,7 @@ export class RunEngine {
             process.env.APP_ENCRYPTION_KEY,
           )))()
           preparationStage = 'bundle_generation'
-          result.ai!.inputBundle = await (this.dependencies.aiInputBuilder ?? buildAiInputBundle)({
+          const inputBundle = await (this.dependencies.aiInputBuilder ?? buildAiInputBundle)({
             projectId: project.projectId,
             runId: result.runId,
             candidates: aiCandidates,
@@ -245,6 +251,9 @@ export class RunEngine {
             now: this.dependencies.now,
             signal,
           })
+          assertDetailLimit(result, inputBundle.items.length)
+          assertOperationalResult({ ...result, ai: { ...result.ai!, inputBundle } })
+          result.ai!.inputBundle = inputBundle
           result.ai!.status = result.ai!.inputBundle.items.length === 0
             ? 'no_targets'
             : project.settings.ai.mode === 'manual' ? 'awaiting_manual' : 'api_checking'
@@ -252,7 +261,9 @@ export class RunEngine {
           inputPrepared = true
         } catch (error) {
           if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
-          const diagnostic = aiPreparationDiagnostic(preparationStage)
+          const diagnostic = error instanceof SecurityFoundationError
+            ? { code: error.code, message: error.message }
+            : aiPreparationDiagnostic(preparationStage)
           result.ai!.status = 'preparation_failed'
           result.ai!.error = {
             code: diagnostic.code,
@@ -283,21 +294,28 @@ export class RunEngine {
             await this.executeApiJudgment(project, result, signal)
           } catch (error) {
             if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
-            const failed = buildFailedAiApiResult(
-              result.ai!.inputBundle!,
-              project.settings.ai.model,
-              project.settings.ai.costLimitUsd,
-              'AI_API_UNEXPECTED_ERROR',
-              'AI判定処理で予期しないエラーが発生しました。',
-            )
-            this.applyApiProgress(result, failed, true)
-            console.error('[ai-api] execution failed', {
-              projectId: result.projectId,
-              runId: result.runId,
-              code: 'AI_API_UNEXPECTED_ERROR',
-              errorType: error instanceof Error ? error.name : 'UnknownError',
-            })
-            await this.event(result, 'ai_api_failed', { code: 'AI_API_UNEXPECTED_ERROR' })
+            if (error instanceof SecurityFoundationError) {
+              result.ai!.status = 'api_failed'
+              result.ai!.error = { code: error.code, message: error.message }
+              result.aiUsage.apiFailureCount += 1
+              await this.event(result, 'ai_api_failed', { code: error.code })
+            } else {
+              const failed = buildFailedAiApiResult(
+                result.ai!.inputBundle!,
+                project.settings.ai.model,
+                project.settings.ai.costLimitUsd,
+                'AI_API_UNEXPECTED_ERROR',
+                'AI判定処理で予期しないエラーが発生しました。',
+              )
+              this.applyApiProgress(result, failed, true)
+              console.error('[ai-api] execution failed', {
+                projectId: result.projectId,
+                runId: result.runId,
+                code: 'AI_API_UNEXPECTED_ERROR',
+                errorType: error instanceof Error ? error.name : 'UnknownError',
+              })
+              await this.event(result, 'ai_api_failed', { code: 'AI_API_UNEXPECTED_ERROR' })
+            }
           }
         }
       }
@@ -328,7 +346,7 @@ export class RunEngine {
         if (result.ai?.status === 'preparing' || result.ai?.status === 'api_checking') result.ai.status = 'canceled'
         result.summary = summarize(result)
         await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
-        await this.event(result, 'run_canceled', { previousStatus, reasonCode: 'USER_REQUESTED' })
+        await this.event(result, 'run_canceled', { previousStatus, reasonCode: 'USER_REQUESTED' }).catch(ignoreTerminalEventLimit)
         return result
       }
       result.status = 'failed'
@@ -337,7 +355,7 @@ export class RunEngine {
       result.fatalError = safeError(error)
       result.summary = summarize(result)
       await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
-      await this.event(result, 'run_failed', { code: result.fatalError.code })
+      await this.event(result, 'run_failed', { code: result.fatalError.code }).catch(ignoreTerminalEventLimit)
       return result
     } finally {
       if (abortInspector) signal?.removeEventListener('abort', abortInspector)
@@ -381,12 +399,18 @@ export class RunEngine {
 
   private applyApiProgress(result: RunResult, progress: AiApiExecutionResult, completed: boolean): void {
     const completedAt = this.dependencies.now().toISOString()
-    result.ai!.apiResult = { output: progress.output, completedAt, failedCount: progress.failedCount }
-    result.ai!.status = completed
+    const nextAi = {
+      ...result.ai!,
+      apiResult: { output: progress.output, completedAt, failedCount: progress.failedCount },
+      status: completed
       ? progress.terminalError ? 'api_failed' : 'completed'
-      : 'api_checking'
-    result.ai!.error = progress.terminalError
-    result.aiUsage = { enabled: true, ...progress.usage }
+      : 'api_checking',
+      error: progress.terminalError,
+    } as NonNullable<RunResult['ai']>
+    const nextUsage = { enabled: true, ...progress.usage }
+    assertOperationalResult({ ...result, ai: nextAi, aiUsage: nextUsage, updatedAt: completedAt })
+    result.ai = nextAi
+    result.aiUsage = nextUsage
     result.updatedAt = completedAt
   }
 
@@ -413,12 +437,24 @@ export class RunEngine {
         throwIfAborted(signal)
         pageResult = await this.buildSuccessfulPage(normalizedUrl, urlIdentity, rows, input, inspection, probe, startedAt, urlIdentityKey, signal)
         throwIfAborted(signal)
-        result.links.push(...pageResultLinks.get(pageResult)!)
-        result.images.push(...pageResultImages.get(pageResult)!)
-        result.googleTagDetections.push(...pageResultTags.get(pageResult)!)
+        const newLinks = pageResultLinks.get(pageResult)!
+        const newImages = pageResultImages.get(pageResult)!
+        const newTags = pageResultTags.get(pageResult)!
+        assertDetailLimit(result, newLinks.length + newImages.length + newTags.length)
+        assertOperationalResult({
+          ...result,
+          pages: [...result.pages, pageResult],
+          links: [...result.links, ...newLinks],
+          images: [...result.images, ...newImages],
+          googleTagDetections: [...result.googleTagDetections, ...newTags],
+        })
+        result.links.push(...newLinks)
+        result.images.push(...newImages)
+        result.googleTagDetections.push(...newTags)
         aiCandidates.push(...(pageResultAiCandidates.get(pageResult) ?? []))
       } catch (error) {
         if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
+        if (error instanceof SecurityFoundationError) throw error
         pageResult = buildFailedPageResult(normalizedUrl, rows, startedAt, this.dependencies.now().toISOString(), error, urlIdentity)
       } finally {
         // WeakMaps are only temporary carriers so the persisted page structure stays specification-focused.
@@ -497,6 +533,24 @@ export class RunEngine {
     ))
     const linkFinding = aggregateLinkFinding(normalizedUrl, pageNames, sourceRows, links)
     const imageFinding = aggregateImageFinding(normalizedUrl, pageNames, sourceRows, images, inspection)
+    const limitDiagnostics = [
+      ...(inspection.linkCandidateLimit ? [{ code: SECURITY_ERROR_CODES.candidateLimitReached, category: 'links' as const, ...inspection.linkCandidateLimit }] : []),
+      ...inspection.images.flatMap(viewport => viewport.candidateLimit
+        ? [{ code: SECURITY_ERROR_CODES.candidateLimitReached, category: 'images' as const, device: viewport.device, ...viewport.candidateLimit }]
+        : []),
+    ]
+    if (inspection.linkCandidateLimit) {
+      linkFinding.verdict = 'needs_review'
+      linkFinding.detailStatus = 'candidate_limit_reached'
+      linkFinding.message = `リンク候補が上限${inspection.linkCandidateLimit.limit}件に達したため、残りは未確認です。`
+      linkFinding.evidence.push(SECURITY_ERROR_CODES.candidateLimitReached)
+    }
+    if (inspection.images.some(viewport => viewport.candidateLimit)) {
+      imageFinding.verdict = 'needs_review'
+      imageFinding.detailStatus = 'candidate_limit_reached'
+      imageFinding.message = '画像候補が端末別上限に達したため、残りは未確認です。'
+      imageFinding.evidence.push(SECURITY_ERROR_CODES.candidateLimitReached)
+    }
     for (const finding of [linkFinding, imageFinding]) {
       finding.key = `${urlIdentity}|${finding.item}`
       finding.urlIdentity = urlIdentity
@@ -519,6 +573,7 @@ export class RunEngine {
         ...(viewport.scroll ? { scroll: viewport.scroll } : {}),
         ...(viewport.error ? { error: viewport.error } : {}),
       })),
+      ...(limitDiagnostics.length ? { limitDiagnostics } : {}),
     }
     pageResultLinks.set(page, links)
     pageResultImages.set(page, images)
@@ -558,6 +613,23 @@ export class RunEngine {
       ...details,
     })
   }
+}
+
+function assertDetailLimit(result: RunResult, additional: number): void {
+  const aiItems = result.ai?.inputBundle?.items.length ?? 0
+  const count = result.links.length + result.images.length + result.googleTagDetections.length + aiItems + additional
+  if (count > SECURITY_LIMITS.runDetailItems) {
+    throw new SecurityFoundationError(SECURITY_ERROR_CODES.detailLimitReached, `個別検査結果が上限${SECURITY_LIMITS.runDetailItems}件を超えました。`)
+  }
+}
+
+function assertOperationalResult(result: RunResult): void {
+  assertRunResultSize(`${JSON.stringify(result, null, 2)}\n`, 'checking')
+}
+
+function ignoreTerminalEventLimit(error: unknown): void {
+  if (error instanceof RunEventSizeError) return
+  throw error
 }
 
 function aiPreparationDiagnostic(stage: 'signing_key' | 'bundle_generation'): { code: string; message: string } {
@@ -854,7 +926,8 @@ function safeError(error: unknown): SafeError {
   if (error instanceof PageInspectionError) {
     return { code: error.code, message: error.message, retryable: error.retryable }
   }
-  const code = error instanceof RunInputError ? 'INPUT_ERROR'
+  const code = error instanceof SecurityFoundationError ? error.code
+    : error instanceof RunInputError ? error.code
     : error instanceof ArchivedProjectError ? 'PROJECT_ARCHIVED'
       : 'RUN_FAILED'
   return { code, message: code === 'RUN_FAILED' ? '検査処理でエラーが発生しました。' : (error as Error).message, retryable: false }

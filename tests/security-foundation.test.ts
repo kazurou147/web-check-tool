@@ -173,10 +173,17 @@ describe('Security-A 共通定数と安全なエラー', () => {
       runResultHardBytes: 50 * 1024 * 1024,
       runResultOperationalBudgetBytes: 48 * 1024 * 1024,
       excelUploadBytes: 20 * 1024 * 1024,
+      excelExpandedBytes: 100 * 1024 * 1024,
+      excelZipEntries: 10_000,
+      excelZipCompressionRatio: 100,
       aiResultUploadBytes: 5 * 1024 * 1024,
       runEventsBytes: 10 * 1024 * 1024,
       linkCandidatesPerPage: 2_000,
       imageCandidatesPerDevice: 2_000,
+      uniquePagesPerRun: 1_000,
+      runDetailItems: 100_000,
+      excelReportRows: 100_000,
+      excelReportBytes: 50 * 1024 * 1024,
     })
   })
 

@@ -8,14 +8,18 @@ import { activeRunStatuses } from '~/shared/utils/run-display'
 import { projectIdSchema } from './validation'
 import { secureEvent, secureInputSnapshot, secureRunResult } from './persistence-security'
 import { initializeUrlIdentityKey } from './url-identity'
+import { SECURITY_ERROR_CODES, SECURITY_LIMITS, SecurityFoundationError } from '~/shared/security/security-constants'
 
 export class RunNotFoundError extends Error {}
 export class RunReportNotFoundError extends Error {}
 export class RunRecoveryError extends Error {}
 export class RunCorruptError extends Error {}
 export class RunTooLargeError extends Error {}
+export class RunResultSizeError extends SecurityFoundationError {}
+export class RunEventSizeError extends SecurityFoundationError {}
+export class RunReportSizeError extends SecurityFoundationError {}
 
-export const MAX_RUN_RESULT_BYTES = 50 * 1024 * 1024
+export const MAX_RUN_RESULT_BYTES = SECURITY_LIMITS.runResultHardBytes
 const RUN_LIST_READ_CONCURRENCY = 4
 
 export interface RunListResult {
@@ -48,10 +52,12 @@ export class RunStore {
     const key = await this.identityKey()
     const safeInput = secureInputSnapshot(input, key)
     const safeResult = secureRunResult(result, key)
+    const resultContent = serialize(safeResult)
+    assertRunResultSize(resultContent, result.status)
     await mkdir(directory, { recursive: false })
     await Promise.all([
       atomicWrite(join(directory, 'input-snapshot.json'), serialize(safeInput)),
-      atomicWrite(join(directory, 'result.json'), serialize(safeResult)),
+      atomicWrite(join(directory, 'result.json'), resultContent),
       writeFile(join(directory, 'events.jsonl'), '', { encoding: 'utf8', flag: 'wx' }),
     ])
   }
@@ -59,6 +65,7 @@ export class RunStore {
   async saveResult(projectId: string, runId: string, result: RunResult): Promise<void> {
     const path = join(this.runDir(projectId, runId), 'result.json')
     const content = serialize(secureRunResult(result, await this.identityKey()))
+    assertRunResultSize(content, result.status)
     await this.enqueue(path, () => atomicWrite(path, content))
   }
 
@@ -81,18 +88,33 @@ export class RunStore {
       }
       const value = await update(result)
       const safeResult = secureRunResult(result, await this.identityKey())
-      await atomicWrite(path, serialize(safeResult))
+      const content = serialize(safeResult)
+      assertRunResultSize(content, safeResult.status)
+      await atomicWrite(path, content)
       return { result: safeResult, value }
     })
   }
 
   async appendEvent(projectId: string, runId: string, event: Record<string, unknown>): Promise<void> {
     const path = join(this.runDir(projectId, runId), 'events.jsonl')
-    await appendFile(path, `${JSON.stringify(secureEvent(event, await this.identityKey()))}\n`, { encoding: 'utf8' })
+    const line = `${JSON.stringify(secureEvent(event, await this.identityKey()))}\n`
+    await this.enqueue(path, async () => {
+      const current = await stat(path).then(value => value.size).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
+        throw error
+      })
+      if (current + Buffer.byteLength(line, 'utf8') > SECURITY_LIMITS.runEventsBytes) {
+        throw new RunEventSizeError(SECURITY_ERROR_CODES.eventLogTooLarge, 'イベントログがサイズ上限に達しました。')
+      }
+      await appendFile(path, line, { encoding: 'utf8' })
+    })
   }
 
   async saveReport(projectId: string, runId: string, bytes: Uint8Array): Promise<void> {
     await this.get(projectId, runId)
+    if (bytes.byteLength > SECURITY_LIMITS.excelReportBytes) {
+      throw new RunReportSizeError(SECURITY_ERROR_CODES.reportTooLarge, 'Excelレポートがサイズ上限を超えています。')
+    }
     const path = this.reportPath(projectId, runId)
     await this.enqueue(path, () => atomicWriteBytes(path, bytes))
   }
@@ -337,6 +359,23 @@ function normalizeLegacyRun(value: RunResult): RunResult {
 
 function serialize(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`
+}
+
+export function assertRunResultSize(
+  content: string,
+  status: RunResult['status'],
+  limits: { hard: number; operational: number } = {
+    hard: SECURITY_LIMITS.runResultHardBytes,
+    operational: SECURITY_LIMITS.runResultOperationalBudgetBytes,
+  },
+): void {
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > limits.hard) {
+    throw new RunResultSizeError(SECURITY_ERROR_CODES.resultTooLarge, '検査結果が保存上限を超えています。')
+  }
+  if (bytes > limits.operational) {
+    throw new RunResultSizeError(SECURITY_ERROR_CODES.resultTooLarge, '検査結果が通常運用予算に達したため安全に停止しました。')
+  }
 }
 
 async function atomicWrite(path: string, content: string): Promise<void> {

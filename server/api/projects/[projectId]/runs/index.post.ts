@@ -12,7 +12,7 @@ export default defineEventHandler(async (event) => {
     return { runId: result.runId, status: result.status }
   } catch (error) {
     if (error instanceof RunBusyError || error instanceof RunInputError) {
-      throw createError({ statusCode: 409, statusMessage: error.message })
+      throw createError({ statusCode: 409, statusMessage: error.message, ...(error instanceof RunInputError ? { data: { code: error.code } } : {}) })
     }
     if (error instanceof RuntimeUnavailableError) {
       throw createError({ statusCode: 503, statusMessage: error.message })

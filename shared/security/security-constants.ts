@@ -10,10 +10,17 @@ export const SECURITY_LIMITS = Object.freeze({
   runResultHardBytes: 50 * MEBIBYTE,
   runResultOperationalBudgetBytes: 48 * MEBIBYTE,
   excelUploadBytes: 20 * MEBIBYTE,
+  excelExpandedBytes: 100 * MEBIBYTE,
+  excelZipEntries: 10_000,
+  excelZipCompressionRatio: 100,
   aiResultUploadBytes: 5 * MEBIBYTE,
   runEventsBytes: 10 * MEBIBYTE,
   linkCandidatesPerPage: 2_000,
   imageCandidatesPerDevice: 2_000,
+  uniquePagesPerRun: 1_000,
+  runDetailItems: 100_000,
+  excelReportRows: 100_000,
+  excelReportBytes: 50 * MEBIBYTE,
 } as const)
 
 export const SECURITY_ERROR_CODES = Object.freeze({
@@ -37,6 +44,10 @@ export const SECURITY_ERROR_CODES = Object.freeze({
   eventLogTooLarge: 'SECURITY_EVENT_LOG_TOO_LARGE',
   candidateLimitReached: 'SECURITY_CANDIDATE_LIMIT_REACHED',
   concurrencyLimitReached: 'SECURITY_CONCURRENCY_LIMIT_REACHED',
+  excelArchiveUnsafe: 'SECURITY_EXCEL_ARCHIVE_UNSAFE',
+  pageLimitReached: 'SECURITY_PAGE_LIMIT_REACHED',
+  detailLimitReached: 'SECURITY_DETAIL_LIMIT_REACHED',
+  reportTooLarge: 'SECURITY_REPORT_TOO_LARGE',
 } as const)
 
 export type SecurityErrorCode = typeof SECURITY_ERROR_CODES[keyof typeof SECURITY_ERROR_CODES]
