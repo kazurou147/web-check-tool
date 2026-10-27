@@ -27,6 +27,9 @@ import type {
 } from '~/shared/types/run'
 import { compareText, visibleText } from '~/shared/utils/run-display'
 import { manualAiCounts } from '~/shared/utils/manual-ai'
+import { maskUrlForDisplay } from '~/shared/security/url-security'
+import { maskSecretText } from './ai-masking'
+import { secureRunForPublic } from './persistence-security'
 
 export class ExcelReportNotReadyError extends Error {}
 
@@ -65,13 +68,14 @@ type ExcelReportRowInput = Partial<ExcelReportRow> & {
 
 export async function buildExcelReport(project: Project, result: RunResult): Promise<Buffer> {
   assertReportableRun(result)
+  const reportResult = secureRunForPublic(result)
   const workbook = new ExcelJS.Workbook()
   workbook.creator = 'Webサイト納品前チェックツール'
-  workbook.created = new Date(result.createdAt)
-  workbook.modified = new Date(result.updatedAt)
+  workbook.created = new Date(reportResult.createdAt)
+  workbook.modified = new Date(reportResult.updatedAt)
 
-  buildSummarySheet(workbook, project, result)
-  const allRows = buildExcelReportRows(result)
+  buildSummarySheet(workbook, project, reportResult)
+  const allRows = buildExcelReportRows(reportResult)
   buildDetailSheet(workbook, REPORT_SHEET_NAMES.issues, REPORT_ISSUE_COLUMNS, allRows.filter(row => (
     row.verdictClass === 'ng' || row.verdictClass === 'needs_review' || row.verdictClass === 'unchecked'
   )), true)
@@ -87,15 +91,19 @@ export function assertReportableRun(result: RunResult): void {
 }
 
 export function buildExcelReportRows(result: RunResult): ExcelReportRow[] {
-  const pageByUrl = new Map(result.pages.map(page => [page.normalizedUrl, page]))
+  const pageByUrl = new Map<string, PageResult>()
+  for (const page of result.pages) {
+    pageByUrl.set(page.urlIdentity ?? page.normalizedUrl, page)
+    if (!pageByUrl.has(page.normalizedUrl)) pageByUrl.set(page.normalizedUrl, page)
+  }
   const rows: ExcelReportRow[] = []
 
   for (const page of result.pages) {
     for (const finding of page.findings) rows.push(findingRow(page, finding))
   }
-  for (const tag of result.googleTagDetections) rows.push(tagRow(pageByUrl.get(tag.pageUrl), tag))
-  for (const link of result.links) rows.push(linkRow(pageByUrl.get(link.pageUrl), link))
-  for (const image of result.images) rows.push(imageRow(pageByUrl.get(image.pageUrl), image))
+  for (const tag of result.googleTagDetections) rows.push(tagRow(pageByUrl.get(tag.pageUrlIdentity ?? tag.pageUrl), tag))
+  for (const link of result.links) rows.push(linkRow(pageByUrl.get(link.pageUrlIdentity ?? link.pageUrl), link))
+  for (const image of result.images) rows.push(imageRow(pageByUrl.get(image.pageUrlIdentity ?? image.pageUrl), image))
   rows.push(...aiRows(result, pageByUrl))
 
   return rows.sort((left, right) => (
@@ -126,18 +134,12 @@ export function safeHttpHyperlink(value: string): string | undefined {
 
 export function redactReportUrl(value: string): string {
   try {
-    const url = new URL(value)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return value
+    const url = new URL(maskUrlForDisplay(value).value)
     url.username = ''
     url.password = ''
-    for (const key of [...url.searchParams.keys()]) {
-      if (/token|key|secret|auth|password|passwd|session|email|user|cid|sid/i.test(key)) {
-        url.searchParams.set(key, '[REDACTED]')
-      }
-    }
     return url.href
   } catch {
-    return value
+    return maskSecretText(value).value
   }
 }
 
@@ -355,8 +357,11 @@ function aiRow(
   pageByUrl: Map<string, PageResult>,
   date: Date,
 ): ExcelReportRow {
-  const sourcePages = [...new Set(item.sourceReferences.map(reference => reference.pageUrl))]
-    .map(url => pageByUrl.get(url))
+  const sourcePages = [...new Set(item.sourceReferences.map((reference) => {
+    const link = result.links.find(candidate => candidate.key === reference.linkResultKey)
+    return link?.pageUrlIdentity ?? reference.pageUrl
+  }))]
+    .map(key => pageByUrl.get(key))
     .filter((page): page is PageResult => Boolean(page))
   const pageNames = [...new Set(sourcePages.flatMap(page => page.pageNames))]
   const sourceRows = [...new Set(sourcePages.flatMap(page => page.sourceRows))].sort((a, b) => a - b)

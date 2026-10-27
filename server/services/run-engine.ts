@@ -53,6 +53,8 @@ import {
 import { ArchivedProjectError, type ProjectStore, useProjectStore } from './project-store'
 import { RunStore } from './run-store'
 import type { RerunRequest } from './validation'
+import { createUrlIdentity, initializeUrlIdentityKey } from './url-identity'
+import { hydrateProjectAuthUrls } from './project-url-security'
 
 export class RunBusyError extends Error {}
 export class RunInputError extends Error {}
@@ -124,10 +126,12 @@ export class RunEngine {
     const secrets = project.settings.auth.mode === 'none'
       ? {}
       : await this.dependencies.projectStore.vault.read(projectId)
+    project.settings = hydrateProjectAuthUrls(project.settings, secrets)
     if (project.settings.auth.mode !== 'none' && !secrets[project.settings.auth.mode]) {
       throw new RunInputError('現在の認証モードに対応する認証情報が保存されていません')
     }
     const runId = randomUUID()
+    const urlIdentityKey = await initializeUrlIdentityKey(this.dependencies.projectStore.dataDir, process.env.APP_ENCRYPTION_KEY)
     const now = this.dependencies.now().toISOString()
     const result: RunResult = {
       schemaVersion: 1,
@@ -188,11 +192,11 @@ export class RunEngine {
         aiMode: requestedAiMode,
       })
     }
-    return { project, secrets, input, result }
+    return { project, secrets, input, result, urlIdentityKey }
   }
 
   async execute(prepared: PreparedRun, signal?: AbortSignal): Promise<RunResult> {
-    const { project, secrets, input, result } = prepared
+    const { project, secrets, input, result, urlIdentityKey } = prepared
     let inspector: WebsiteInspector | undefined
     let abortInspector: (() => void) | undefined
     try {
@@ -212,7 +216,7 @@ export class RunEngine {
       const aiCandidates: AiSourceCandidate[] = []
       const workers = await Promise.allSettled(Array.from(
         { length: workerCount },
-        () => this.worker(queue, input, result, inspector!, probe, aiCandidates, signal),
+        () => this.worker(queue, input, result, inspector!, probe, aiCandidates, urlIdentityKey, signal),
       ))
       const rejected = workers.find((worker): worker is PromiseRejectedResult => worker.status === 'rejected')
       if (rejected) throw rejected.reason
@@ -386,6 +390,7 @@ export class RunEngine {
     inspector: WebsiteInspector,
     probe: LinkProbe,
     aiCandidates: AiSourceCandidate[],
+    urlIdentityKey: Uint8Array,
     signal?: AbortSignal,
   ): Promise<void> {
     while (true) {
@@ -393,12 +398,13 @@ export class RunEngine {
       const next = queue.shift()
       if (!next) return
       const [normalizedUrl, rows] = next
+      const urlIdentity = createUrlIdentity(normalizedUrl, urlIdentityKey)
       const startedAt = this.dependencies.now().toISOString()
       let pageResult: PageResult
       try {
         const inspection = await inspector.inspect(rows[0]!.url, signal)
         throwIfAborted(signal)
-        pageResult = await this.buildSuccessfulPage(normalizedUrl, rows, input, inspection, probe, startedAt, signal)
+        pageResult = await this.buildSuccessfulPage(normalizedUrl, urlIdentity, rows, input, inspection, probe, startedAt, urlIdentityKey, signal)
         throwIfAborted(signal)
         result.links.push(...pageResultLinks.get(pageResult)!)
         result.images.push(...pageResultImages.get(pageResult)!)
@@ -406,7 +412,7 @@ export class RunEngine {
         aiCandidates.push(...(pageResultAiCandidates.get(pageResult) ?? []))
       } catch (error) {
         if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
-        pageResult = buildFailedPageResult(normalizedUrl, rows, startedAt, this.dependencies.now().toISOString(), error)
+        pageResult = buildFailedPageResult(normalizedUrl, rows, startedAt, this.dependencies.now().toISOString(), error, urlIdentity)
       } finally {
         // WeakMaps are only temporary carriers so the persisted page structure stays specification-focused.
       }
@@ -417,7 +423,7 @@ export class RunEngine {
       result.summary = summarize(result)
       await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
       throwIfAborted(signal)
-      await this.event(result, 'page_completed', { url: normalizedUrl, verdict: pageResult.findings[0]?.verdict })
+      await this.event(result, 'page_completed', { urlIdentity, verdict: pageResult.findings[0]?.verdict })
       pageResultLinks.delete(pageResult)
       pageResultImages.delete(pageResult)
       pageResultTags.delete(pageResult)
@@ -427,22 +433,25 @@ export class RunEngine {
 
   private async buildSuccessfulPage(
     normalizedUrl: string,
+    urlIdentity: string,
     rows: InputPageRow[],
     input: InputSnapshot,
     inspection: PageInspection,
     probe: LinkProbe,
     startedAt: string,
+    urlIdentityKey: Uint8Array,
     signal?: AbortSignal,
   ): Promise<PageResult> {
     const pageNames = rows.map(row => row.displayName)
     const sourceRows = rows.map(row => row.sourceRow)
     const duplicate = input.duplicateGroups.find(group => group.normalizedUrl === normalizedUrl)
     const pageFetch: Finding = {
-      key: `${normalizedUrl}|page_fetch`,
+      key: `${urlIdentity}|page_fetch`,
       item: 'page_fetch',
       verdict: 'ok',
       detailStatus: 'fetched',
       url: normalizedUrl,
+      urlIdentity,
       pageNames,
       sourceRows,
       actual: { status: inspection.status, finalUrl: redactForResult(inspection.finalUrl) },
@@ -450,8 +459,13 @@ export class RunEngine {
       evidence: [`HTTP ${inspection.status}`, `試行回数: ${inspection.attempts}`],
     }
     const metadata = checkMetadata(normalizedUrl, rows, duplicate, inspection.metadata)
+    metadata.forEach((finding) => {
+      finding.key = `${urlIdentity}|${finding.item}`
+      finding.urlIdentity = urlIdentity
+    })
     const tags = checkGoogleTags({
       pageUrl: normalizedUrl,
+      pageUrlIdentity: urlIdentity,
       pageNames,
       sourceRows,
       rawHtml: inspection.rawHtml,
@@ -459,19 +473,33 @@ export class RunEngine {
       network: inspection.networkTags,
       expected: input.expectedGoogleTags,
     })
-    const links = await checkLinks(normalizedUrl, inspection.links, new Set(inspection.anchorTargets), probe, signal, inspection.finalUrl)
+    tags.finding.key = `${urlIdentity}|google_tags`
+    tags.finding.urlIdentity = urlIdentity
+    const tagKeys = new Map(tags.detections.map(tag => [tag.key, `${urlIdentity}|${tag.id}|${tag.detectionMethod}`]))
+    tags.detections.forEach((tag) => {
+      tag.key = tagKeys.get(tag.key)!
+      tag.relatedDetectionKeys = tag.relatedDetectionKeys.map(key => tagKeys.get(key) ?? key)
+    })
+    const links = await checkLinks(normalizedUrl, inspection.links, new Set(inspection.anchorTargets), probe, signal, inspection.finalUrl, urlIdentityKey)
     const images = inspection.images.flatMap(viewport => checkImages(
       normalizedUrl,
       viewport.device,
       viewport.images,
       viewport.timedOut || (viewport.scroll !== undefined && !viewport.scroll.reachedStableBottom),
+      urlIdentityKey,
     ))
     const linkFinding = aggregateLinkFinding(normalizedUrl, pageNames, sourceRows, links)
     const imageFinding = aggregateImageFinding(normalizedUrl, pageNames, sourceRows, images, inspection)
+    for (const finding of [linkFinding, imageFinding]) {
+      finding.key = `${urlIdentity}|${finding.item}`
+      finding.urlIdentity = urlIdentity
+    }
     const page: PageResult = {
       normalizedUrl,
+      urlIdentity,
       requestedUrl: redactForResult(inspection.requestedUrl),
       finalUrl: redactForResult(inspection.finalUrl),
+      finalUrlIdentity: createUrlIdentity(inspection.finalUrl, urlIdentityKey),
       pageNames,
       sourceRows,
       startedAt,
@@ -543,6 +571,7 @@ interface PreparedRun {
   secrets: ProjectSecrets
   input: InputSnapshot
   result: RunResult
+  urlIdentityKey: Uint8Array
 }
 
 export class RunCoordinator {
@@ -772,16 +801,17 @@ export function buildFailedPageResult(
   startedAt: string,
   finishedAt: string,
   error: unknown,
+  urlIdentity?: string,
 ): PageResult {
   const normalizedError = safeError(error)
   const attempts = error instanceof PageInspectionError ? error.attempts : 1
   const status = error instanceof PageInspectionError ? error.status : undefined
   const pageNames = rows.map(row => row.displayName)
   const sourceRows = rows.map(row => row.sourceRow)
-  const base = { url: normalizedUrl, pageNames, sourceRows, evidence: [normalizedError.code] }
+  const base = { url: normalizedUrl, ...(urlIdentity ? { urlIdentity } : {}), pageNames, sourceRows, evidence: [normalizedError.code] }
   const findings: Finding[] = [{
     ...base,
-    key: `${normalizedUrl}|page_fetch`,
+    key: `${urlIdentity ?? normalizedUrl}|page_fetch`,
     item: 'page_fetch',
     verdict: 'ng',
     detailStatus: 'fetch_failed',
@@ -791,7 +821,7 @@ export function buildFailedPageResult(
   for (const item of ['title', 'description', 'google_tags', 'links', 'images'] as const) {
     findings.push({
       ...base,
-      key: `${normalizedUrl}|${item}`,
+      key: `${urlIdentity ?? normalizedUrl}|${item}`,
       item,
       verdict: 'unchecked',
       detailStatus: 'page_unavailable',
@@ -800,6 +830,7 @@ export function buildFailedPageResult(
   }
   return {
     normalizedUrl,
+    ...(urlIdentity ? { urlIdentity } : {}),
     requestedUrl: redactForResult(rows[0]!.url),
     pageNames,
     sourceRows,

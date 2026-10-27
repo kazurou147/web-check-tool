@@ -87,6 +87,7 @@ function maskSensitiveTextCore(value: string, maskUrls: boolean, maskPersonal = 
       const trailing = matched.match(/[),.;!?。、「」』】]+$/u)?.[0] ?? ''
       const urlPart = trailing ? matched.slice(0, -trailing.length) : matched
       const masked = maskSensitiveUrl(urlPart)
+      if (masked.maskedCount === 0) return matched
       tracker.merge(masked)
       return `${masked.value}${trailing}`
     })

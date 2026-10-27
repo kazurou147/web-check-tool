@@ -30,6 +30,7 @@ export interface InputPageRow {
   displayName: string
   url: string
   normalizedUrl: string
+  urlIdentity?: string
   expectedTitle: string | null
   expectedDescription: string | null
   titleState: ExpectationState
@@ -43,6 +44,7 @@ export interface DuplicateExpectation {
 
 export interface DuplicateUrlGroup {
   normalizedUrl: string
+  urlIdentity?: string
   sourceRows: number[]
   pageNames: string[]
   titleExpectation: DuplicateExpectation

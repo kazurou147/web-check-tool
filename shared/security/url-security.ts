@@ -16,6 +16,7 @@ const SENSITIVE_SINGLE_PARTS = new Set([
   'sessionid',
   'sid',
   'cookie',
+  'cid',
 ])
 
 const SENSITIVE_COMBINATIONS = new Set([
@@ -74,12 +75,12 @@ export function maskUrlForDisplay(value: string): MaskedDisplayUrl {
     maskedCount += 1
     categories.add('url_userinfo')
   }
-  for (const key of [...new Set(url.searchParams.keys())]) {
-    if (!isSensitiveQueryName(key)) continue
-    const values = url.searchParams.getAll(key)
-    url.searchParams.delete(key)
-    for (const _value of values) {
-      url.searchParams.append(key, URL_REDACTION_MARKER)
+  const parameters = [...url.searchParams.entries()]
+  url.search = ''
+  for (const [key, value] of parameters) {
+    const sensitive = isSensitiveQueryName(key)
+    url.searchParams.append(key, sensitive ? URL_REDACTION_MARKER : value)
+    if (sensitive) {
       maskedCount += 1
       categories.add('url_query_secret')
     }

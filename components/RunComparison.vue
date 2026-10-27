@@ -52,9 +52,9 @@ async function loadComparison() {
   loading.value = true
   errorMessage.value = ''
   try {
-    comparison.value = await $fetch<RunComparisonResponse>(`/api/projects/${props.projectId}/compare`, {
+    comparison.value = await $fetch(`/api/projects/${props.projectId}/compare`, {
       query: { base: baseRunId.value, target: targetRunId.value, category: category.value || undefined, pageUrl: pageUrl.value || undefined, item: item.value || undefined, page: page.value, pageSize: 25 },
-    })
+    }) as RunComparisonResponse
   } catch (caught) {
     errorMessage.value = (caught as { data?: { statusMessage?: string } }).data?.statusMessage ?? '履歴を比較できませんでした。'
   } finally {

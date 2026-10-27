@@ -5,6 +5,7 @@ import type { Project, ProjectSettings, ProjectView } from '~/shared/types/proje
 import { defaultProjectSettings } from '~/shared/types/project'
 import { projectIdSchema } from './validation'
 import { SecretVault } from './secret-vault'
+import { publicProjectView } from './project-url-security'
 
 export class ArchivedProjectError extends Error {}
 export class ProjectNotFoundError extends Error {}
@@ -81,7 +82,7 @@ export class ProjectStore {
   }
 
   async view(project: Project): Promise<ProjectView> {
-    return { ...project, credentialsConfigured: await this.vault.exists(project.projectId) }
+    return publicProjectView(project, await this.vault.exists(project.projectId))
   }
 
   async list(archived: boolean): Promise<ProjectView[]> {

@@ -2,6 +2,7 @@ import type { InstanceLease } from './instance-lease'
 import { InstanceLease as Lease } from './instance-lease'
 import { useProjectStore } from './project-store'
 import { useRunStore } from './run-engine'
+import { initializeUrlIdentityKey } from './url-identity'
 
 export class RuntimeUnavailableError extends Error {}
 
@@ -50,6 +51,7 @@ async function initialize(): Promise<void> {
   try {
     const projectStore = useProjectStore()
     state.lease = await Lease.acquire(projectStore.dataDir)
+    await initializeUrlIdentityKey(projectStore.dataDir, process.env.APP_ENCRYPTION_KEY)
     await useRunStore().recoverInterruptedRuns()
     state.ready = true
   } catch (error) {

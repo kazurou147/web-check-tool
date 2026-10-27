@@ -8,7 +8,7 @@ async function archive(project: ProjectListItem) {
   if (!confirm(`「${project.name}」をアーカイブしますか？ファイルと履歴は保持されます。`)) return
   busyId.value = project.projectId
   try {
-    await $fetch(`/api/projects/${project.projectId}/archive`, { method: 'POST' })
+    await secureFetch(`/api/projects/${project.projectId}/archive`, { method: 'POST' })
     await refresh()
   } finally {
     busyId.value = ''

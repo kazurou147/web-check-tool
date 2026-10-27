@@ -1,5 +1,6 @@
 import type { ImageDevice, ImageResult, ImageSourceKind, Verdict } from '~/shared/types/run'
 import { redactUrl } from './links'
+import { createUrlIdentity } from '../url-identity'
 
 export interface CapturedImage {
   imageUrl: string
@@ -35,14 +36,19 @@ export function checkImages(
   device: ImageDevice,
   images: CapturedImage[],
   timedOut: boolean,
+  identityKey?: Uint8Array,
 ): ImageResult[] {
   return images.map((image, index) => {
     const { verdict, message, evidence, exclusion } = imageVerdict(image, device, timedOut)
+    const pageUrlIdentity = identityKey ? optionalIdentity(pageUrl, identityKey) : undefined
+    const imageUrlIdentity = identityKey ? optionalIdentity(image.imageUrl, identityKey) : undefined
     return {
-      key: `${pageUrl}|image|${device}|${index}|${image.imageUrl}`,
+      key: `${pageUrlIdentity ?? pageUrl}|image|${device}|${index}|${imageUrlIdentity ?? redactUrl(image.imageUrl)}`,
       pageUrl,
+      ...(pageUrlIdentity ? { pageUrlIdentity } : {}),
       device,
       imageUrl: redactUrl(image.imageUrl),
+      ...(imageUrlIdentity ? { imageUrlIdentity } : {}),
       sourceKind: image.sourceKind,
       location: image.location,
       verdict,
@@ -51,6 +57,14 @@ export function checkImages(
       ...(exclusion ? { exclusion } : {}),
     }
   })
+}
+
+function optionalIdentity(value: string, key: Uint8Array): string | undefined {
+  try {
+    return createUrlIdentity(value, key)
+  } catch {
+    return undefined
+  }
 }
 
 function imageVerdict(

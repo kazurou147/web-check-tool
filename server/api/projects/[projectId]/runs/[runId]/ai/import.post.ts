@@ -9,6 +9,7 @@ import {
 import { requireProjectId, requireRunId } from '~/server/services/request'
 import { RunNotFoundError } from '~/server/services/run-store'
 import { useRunStore } from '~/server/services/run-engine'
+import { secureRunForPublic } from '~/server/services/persistence-security'
 
 const ACCEPTED_TYPES = new Set(['application/json', 'text/json', 'application/octet-stream'])
 
@@ -43,7 +44,7 @@ export default defineEventHandler(async (event) => {
       signingKey: await loadOrCreateAiSigningKey(store.projectsDir, process.env.APP_ENCRYPTION_KEY),
     })
     return {
-      result: imported.result,
+      result: secureRunForPublic(imported.result),
       idempotent: imported.idempotent,
       message: imported.idempotent
         ? '同じAI判定結果はすでに取り込み済みです。保存内容は変更していません。'

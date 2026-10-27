@@ -44,6 +44,7 @@ export interface Finding {
   verdict: Verdict
   detailStatus: string
   url: string
+  urlIdentity?: string
   pageNames: string[]
   sourceRows: number[]
   expected?: unknown
@@ -55,8 +56,10 @@ export interface Finding {
 
 export interface PageResult {
   normalizedUrl: string
+  urlIdentity?: string
   requestedUrl: string
   finalUrl?: string
+  finalUrlIdentity?: string
   pageNames: string[]
   sourceRows: number[]
   startedAt: string
@@ -75,6 +78,7 @@ export type GoogleTagType = 'gtm' | 'ga4' | 'google_ads' | 'google_tag' | 'flood
 export interface GoogleTagDetection {
   key: string
   pageUrl: string
+  pageUrlIdentity?: string
   id: string
   tagType: GoogleTagType
   detectionMethod: GoogleTagDetectionMethod
@@ -104,9 +108,12 @@ export type LinkKind = 'http' | 'pdf' | 'anchor' | 'mailto' | 'tel' | 'non_http'
 export interface LinkResult {
   key: string
   pageUrl: string
+  pageUrlIdentity?: string
   href: string
   resolvedUrl?: string
   finalUrl?: string
+  targetUrlIdentity?: string
+  finalUrlIdentity?: string
   kind: LinkKind
   verdict: Verdict
   status?: number
@@ -123,8 +130,10 @@ export type ImageSourceKind = 'img' | 'picture' | 'srcset' | 'css_background' | 
 export interface ImageResult {
   key: string
   pageUrl: string
+  pageUrlIdentity?: string
   device: ImageDevice
   imageUrl: string
+  imageUrlIdentity?: string
   sourceKind: ImageSourceKind
   location: string
   verdict: Verdict

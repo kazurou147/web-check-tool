@@ -7,7 +7,7 @@ const busyId = ref('')
 async function unarchive(project: ProjectListItem) {
   busyId.value = project.projectId
   try {
-    await $fetch(`/api/projects/${project.projectId}/unarchive`, { method: 'POST' })
+    await secureFetch(`/api/projects/${project.projectId}/unarchive`, { method: 'POST' })
     await refresh()
   } finally {
     busyId.value = ''

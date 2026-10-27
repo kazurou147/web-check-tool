@@ -3,6 +3,7 @@ import { ArchivedProjectError, useProjectStore } from '~/server/services/project
 import { readValidatedBody, requireProjectId } from '~/server/services/request'
 import { parseEncryptionKey } from '~/server/services/secret-vault'
 import { projectMutationSchema } from '~/server/services/validation'
+import { hydrateProjectAuthUrls, mergeProjectSecrets, prepareProjectSettingsUpdate, protectProjectAuthUrls } from '~/server/services/project-url-security'
 
 export default defineEventHandler(async (event) => {
   const projectId = requireProjectId(event)
@@ -17,10 +18,14 @@ export default defineEventHandler(async (event) => {
         throw createError({ statusCode: 400, statusMessage: '選択した認証方式のユーザー名とパスワードが必要です' })
       }
     }
-    if (input.secrets) parseEncryptionKey(process.env.APP_ENCRYPTION_KEY)
+    const storedSecrets = await store.vault.exists(projectId) ? await store.vault.read(projectId) : {}
+    const currentSettings = hydrateProjectAuthUrls(current.settings, storedSecrets)
+    const submittedSettings = prepareProjectSettingsUpdate(currentSettings, input.settings)
+    const protectedInput = protectProjectAuthUrls(submittedSettings, mergeProjectSecrets(storedSecrets, input.secrets))
+    if (Object.keys(protectedInput.secrets).length) parseEncryptionKey(process.env.APP_ENCRYPTION_KEY)
     if (current.archivedAt) throw new ArchivedProjectError('アーカイブ中の案件は編集できません')
-    const project = await store.update(projectId, { name: input.name, settings: input.settings })
-    if (input.secrets) await store.vault.write(projectId, input.secrets)
+    const project = await store.update(projectId, { name: input.name, settings: protectedInput.settings })
+    if (Object.keys(protectedInput.secrets).length) await store.vault.write(projectId, protectedInput.secrets)
     return { project: await store.view(project) }
   } catch (error) {
     return toApiError(error)

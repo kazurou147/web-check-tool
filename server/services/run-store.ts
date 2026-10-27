@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto'
 import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { InputSnapshot } from '~/shared/types/excel-input'
 import type { RunHistoryHealth } from '~/shared/types/project'
 import type { ActiveRunStatus, RunResult, RunSummary } from '~/shared/types/run'
 import { activeRunStatuses } from '~/shared/utils/run-display'
 import { projectIdSchema } from './validation'
+import { secureEvent, secureInputSnapshot, secureRunResult } from './persistence-security'
+import { initializeUrlIdentityKey } from './url-identity'
 
 export class RunNotFoundError extends Error {}
 export class RunReportNotFoundError extends Error {}
@@ -43,17 +45,20 @@ export class RunStore {
 
   async create(projectId: string, runId: string, input: InputSnapshot, result: RunResult): Promise<void> {
     const directory = this.runDir(projectId, runId)
+    const key = await this.identityKey()
+    const safeInput = secureInputSnapshot(input, key)
+    const safeResult = secureRunResult(result, key)
     await mkdir(directory, { recursive: false })
     await Promise.all([
-      atomicWrite(join(directory, 'input-snapshot.json'), serialize(input)),
-      atomicWrite(join(directory, 'result.json'), serialize(result)),
+      atomicWrite(join(directory, 'input-snapshot.json'), serialize(safeInput)),
+      atomicWrite(join(directory, 'result.json'), serialize(safeResult)),
       writeFile(join(directory, 'events.jsonl'), '', { encoding: 'utf8', flag: 'wx' }),
     ])
   }
 
   async saveResult(projectId: string, runId: string, result: RunResult): Promise<void> {
     const path = join(this.runDir(projectId, runId), 'result.json')
-    const content = serialize(result)
+    const content = serialize(secureRunResult(result, await this.identityKey()))
     await this.enqueue(path, () => atomicWrite(path, content))
   }
 
@@ -75,14 +80,15 @@ export class RunStore {
         throw new Error('検査結果の形式が不正です')
       }
       const value = await update(result)
-      await atomicWrite(path, serialize(result))
-      return { result, value }
+      const safeResult = secureRunResult(result, await this.identityKey())
+      await atomicWrite(path, serialize(safeResult))
+      return { result: safeResult, value }
     })
   }
 
   async appendEvent(projectId: string, runId: string, event: Record<string, unknown>): Promise<void> {
     const path = join(this.runDir(projectId, runId), 'events.jsonl')
-    await appendFile(path, `${JSON.stringify(event)}\n`, { encoding: 'utf8' })
+    await appendFile(path, `${JSON.stringify(secureEvent(event, await this.identityKey()))}\n`, { encoding: 'utf8' })
   }
 
   async saveReport(projectId: string, runId: string, bytes: Uint8Array): Promise<void> {
@@ -241,6 +247,11 @@ export class RunStore {
       resolveTail()
       if (this.writeQueues.get(path) === tail) this.writeQueues.delete(path)
     }
+  }
+
+  private async identityKey(): Promise<Buffer> {
+    const dataDir = basename(this.projectsDir).toLowerCase() === 'projects' ? dirname(this.projectsDir) : this.projectsDir
+    return await initializeUrlIdentityKey(dataDir, process.env.APP_ENCRYPTION_KEY)
   }
 }
 

@@ -95,7 +95,7 @@ async function startRun() {
   starting.value = true
   setRunMessage('', 'success')
   try {
-    const started = await $fetch<{ runId: string; status: RunStatus }>(`/api/projects/${props.projectId}/runs`, {
+    const started = await secureFetch<{ runId: string; status: RunStatus }>(`/api/projects/${props.projectId}/runs`, {
       method: 'POST',
     })
     selectedRunId.value = started.runId
@@ -116,7 +116,7 @@ async function cancelRun() {
   canceling.value = true
   let accepted = false
   try {
-    const response = await $fetch<{ message: string }>(
+    const response = await secureFetch<{ message: string }>(
       `/api/projects/${props.projectId}/runs/${selectedRunId.value}/cancel`,
       { method: 'POST' },
     )
@@ -146,7 +146,7 @@ async function loadRun(runId: string, updateRoute = true) {
   if (!runId || loadingResult.value) return
   loadingResult.value = true
   try {
-    const response = await $fetch<{ result: RunResult }>(`/api/projects/${props.projectId}/runs/${runId}`)
+    const response = await $fetch(`/api/projects/${props.projectId}/runs/${runId}`) as { result: RunResult }
     result.value = response.result
     selectedRunId.value = runId
     if (updateRoute && route.query.run !== runId) {
@@ -162,7 +162,7 @@ async function loadRun(runId: string, updateRoute = true) {
 }
 
 async function refreshHistory() {
-  const response = await $fetch<{ runs: RunSummary[]; historyHealth: RunHistoryHealth }>(`/api/projects/${props.projectId}/runs`)
+  const response = await $fetch(`/api/projects/${props.projectId}/runs`) as { runs: RunSummary[]; historyHealth: RunHistoryHealth }
   runs.value = response.runs
   historyHealth.value = response.historyHealth
 }
@@ -197,7 +197,7 @@ async function downloadExcelReport() {
   downloadingExcel.value = true
   setRunMessage('', 'success')
   try {
-    await $fetch(`/api/projects/${props.projectId}/runs/${selectedRunId.value}/export/excel`, { method: 'POST' })
+    await secureFetch(`/api/projects/${props.projectId}/runs/${selectedRunId.value}/export/excel`, { method: 'POST' })
     const response = await fetch(`/api/projects/${props.projectId}/runs/${selectedRunId.value}/export/excel`)
     if (!response.ok) {
       const error = await response.json().catch(() => ({})) as { statusMessage?: string }
@@ -258,7 +258,7 @@ async function rerunAllUrls() {
   rerunning.value = true
   setRunMessage('', 'success')
   try {
-    const started = await $fetch<{ runId: string; status: RunStatus }>(
+    const started = await secureFetch<{ runId: string; status: RunStatus }>(
       `/api/projects/${props.projectId}/runs/${result.value.runId}/rerun`,
       {
         method: 'POST',
@@ -300,7 +300,7 @@ async function importAiResult(event: Event) {
   try {
     const body = new FormData()
     body.append('file', file)
-    const response = await $fetch<{ result: RunResult; idempotent: boolean; message: string }>(
+    const response = await secureFetch<{ result: RunResult; idempotent: boolean; message: string }>(
       `/api/projects/${props.projectId}/runs/${selectedRunId.value}/ai/import`,
       { method: 'POST', body },
     )
@@ -334,11 +334,15 @@ function stopPolling() {
 }
 
 function linksFor(page: PageResult): LinkResult[] {
-  return result.value?.links.filter(item => item.pageUrl === page.normalizedUrl) ?? []
+  return result.value?.links.filter(item => page.urlIdentity && item.pageUrlIdentity
+    ? item.pageUrlIdentity === page.urlIdentity
+    : item.pageUrl === page.normalizedUrl) ?? []
 }
 
 function imagesFor(page: PageResult): ImageResult[] {
-  return result.value?.images.filter(item => item.pageUrl === page.normalizedUrl) ?? []
+  return result.value?.images.filter(item => page.urlIdentity && item.pageUrlIdentity
+    ? item.pageUrlIdentity === page.urlIdentity
+    : item.pageUrl === page.normalizedUrl) ?? []
 }
 
 function imageCountsFor(page: PageResult) {
@@ -346,7 +350,9 @@ function imageCountsFor(page: PageResult) {
 }
 
 function tagsFor(page: PageResult): GoogleTagDetection[] {
-  return result.value?.googleTagDetections.filter(item => item.pageUrl === page.normalizedUrl) ?? []
+  return result.value?.googleTagDetections.filter(item => page.urlIdentity && item.pageUrlIdentity
+    ? item.pageUrlIdentity === page.urlIdentity
+    : item.pageUrl === page.normalizedUrl) ?? []
 }
 
 function formatDate(value?: string): string {
@@ -697,7 +703,7 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
 
             <details
               v-for="page in result.pages"
-              :key="page.normalizedUrl"
+              :key="page.urlIdentity || page.normalizedUrl"
               class="page-result"
               :open="highestFindingVerdict(page.findings) !== 'ok'"
             >

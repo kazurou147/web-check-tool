@@ -73,7 +73,7 @@ function buildComparableRecords(run: RunResult): ComparableRecord[] {
   for (const page of run.pages ?? []) {
     for (const finding of page.findings ?? []) {
       records.push(record({
-        semanticKey: `aggregate|${page.normalizedUrl}|${finding.item}`,
+        semanticKey: `aggregate|${page.urlIdentity ?? canonicalUrl(page.normalizedUrl)}|${finding.item}`,
         category: 'aggregate',
         entityType: 'page_finding',
         item: finding.item,
@@ -91,11 +91,11 @@ function buildComparableRecords(run: RunResult): ComparableRecord[] {
   }
 
   for (const link of run.links ?? []) {
-    const target = canonicalUrl(link.resolvedUrl || link.href)
+    const target = link.targetUrlIdentity ?? canonicalUrl(link.resolvedUrl || link.href)
     records.push(record({
-      semanticKey: `detail|link|${canonicalUrl(link.pageUrl)}|${link.kind}|${target}`,
+      semanticKey: `detail|link|${link.pageUrlIdentity ?? canonicalUrl(link.pageUrl)}|${link.kind}|${target}`,
       category: 'detail', entityType: 'link', item: 'リンク', pageUrl: safeUrl(link.pageUrl),
-      pageNames: pageNamesFor(run, link.pageUrl), sourceRows: sourceRowsFor(run, link.pageUrl),
+      pageNames: pageNamesFor(run, link.pageUrl, link.pageUrlIdentity), sourceRows: sourceRowsFor(run, link.pageUrl, link.pageUrlIdentity),
       stableKey: link.key, verdict: link.verdict, detailStatus: link.kind, message: link.message,
       expected: link.href,
       actual: { resolvedUrl: link.resolvedUrl, finalUrl: link.finalUrl, status: link.status, contentType: link.contentType, redirectCount: link.redirectCount },
@@ -104,9 +104,9 @@ function buildComparableRecords(run: RunResult): ComparableRecord[] {
 
   for (const image of run.images ?? []) {
     records.push(record({
-      semanticKey: `detail|image|${canonicalUrl(image.pageUrl)}|${image.device}|${image.sourceKind}|${canonicalUrl(image.imageUrl)}`,
+      semanticKey: `detail|image|${image.pageUrlIdentity ?? canonicalUrl(image.pageUrl)}|${image.device}|${image.sourceKind}|${image.imageUrlIdentity ?? canonicalUrl(image.imageUrl)}`,
       category: 'detail', entityType: 'image', item: '画像', pageUrl: safeUrl(image.pageUrl),
-      pageNames: pageNamesFor(run, image.pageUrl), sourceRows: sourceRowsFor(run, image.pageUrl), device: image.device,
+      pageNames: pageNamesFor(run, image.pageUrl, image.pageUrlIdentity), sourceRows: sourceRowsFor(run, image.pageUrl, image.pageUrlIdentity), device: image.device,
       stableKey: image.key, verdict: image.verdict, detailStatus: image.sourceKind, message: image.message,
       actual: { imageUrl: image.imageUrl, location: image.location, exclusion: image.exclusion },
       fingerprintValue: { verdict: image.verdict, detailStatus: image.sourceKind, message: image.message, imageUrl: image.imageUrl, exclusion: image.exclusion },
@@ -115,9 +115,9 @@ function buildComparableRecords(run: RunResult): ComparableRecord[] {
 
   for (const tag of run.googleTagDetections ?? []) {
     records.push(record({
-      semanticKey: `detail|tag|${canonicalUrl(tag.pageUrl)}|${tag.id}|${tag.tagType}|${tag.detectionMethod}`,
+      semanticKey: `detail|tag|${tag.pageUrlIdentity ?? canonicalUrl(tag.pageUrl)}|${tag.id}|${tag.tagType}|${tag.detectionMethod}`,
       category: 'detail', entityType: 'google_tag', item: 'Googleタグ', pageUrl: safeUrl(tag.pageUrl),
-      pageNames: pageNamesFor(run, tag.pageUrl), sourceRows: sourceRowsFor(run, tag.pageUrl),
+      pageNames: pageNamesFor(run, tag.pageUrl, tag.pageUrlIdentity), sourceRows: sourceRowsFor(run, tag.pageUrl, tag.pageUrlIdentity),
       stableKey: tag.key, verdict: tag.verdict, detailStatus: tag.installationMethod, message: tag.verdictReason,
       expected: { id: tag.id, tagType: tag.tagType },
       actual: { detectionMethod: tag.detectionMethod, installationMethod: tag.installationMethod, sourceTagId: tag.sourceTagId, location: tag.location, occurrences: tag.occurrences },
@@ -132,7 +132,7 @@ function buildComparableRecords(run: RunResult): ComparableRecord[] {
   for (const duplicate of run.input.duplicateGroups ?? []) {
     const hasConflict = duplicate.titleExpectation.state === 'conflict' || duplicate.descriptionExpectation.state === 'conflict'
     records.push(record({
-      semanticKey: `input|duplicate|${duplicate.normalizedUrl}`,
+      semanticKey: `input|duplicate|${duplicate.urlIdentity ?? canonicalUrl(duplicate.normalizedUrl)}`,
       category: 'input', entityType: 'duplicate_url', item: '重複URL', pageUrl: safeUrl(duplicate.normalizedUrl),
       pageNames: duplicate.pageNames, sourceRows: duplicate.sourceRows,
       stableKey: `duplicate|${duplicate.normalizedUrl}`,
@@ -349,12 +349,16 @@ function descriptor(run: RunResult): ComparisonRunDescriptor {
   }
 }
 
-function pageNamesFor(run: RunResult, pageUrl: string): string[] {
-  return (run.pages ?? []).find(page => page.normalizedUrl === pageUrl)?.pageNames ?? []
+function pageNamesFor(run: RunResult, pageUrl: string, identity?: string): string[] {
+  return findPage(run, pageUrl, identity)?.pageNames ?? []
 }
 
-function sourceRowsFor(run: RunResult, pageUrl: string): number[] {
-  return (run.pages ?? []).find(page => page.normalizedUrl === pageUrl)?.sourceRows ?? []
+function sourceRowsFor(run: RunResult, pageUrl: string, identity?: string): number[] {
+  return findPage(run, pageUrl, identity)?.sourceRows ?? []
+}
+
+function findPage(run: RunResult, pageUrl: string, identity?: string) {
+  return (run.pages ?? []).find(page => identity && page.urlIdentity ? page.urlIdentity === identity : page.normalizedUrl === pageUrl)
 }
 
 function groupBySemanticKey(records: ComparableRecord[]): Map<string, ComparableRecord[]> {

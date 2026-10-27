@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { $fetch as rawFetch } from 'ofetch'
 import type { ProjectMutationInput, ProjectView } from '~/shared/types/project'
 
 const route = useRoute()
@@ -16,7 +15,7 @@ async function save(payload: ProjectMutationInput) {
   submitting.value = true
   setMessage('', 'success')
   try {
-    await rawFetch(`/api/projects/${projectId}`, { method: 'PATCH', body: payload })
+    await secureFetch(`/api/projects/${projectId}`, { method: 'PATCH', body: payload })
     await refresh()
     setMessage('案件設定を保存しました。', 'success')
   } catch (caught) {
@@ -33,7 +32,7 @@ async function uploadExcel() {
   const body = new FormData()
   body.append('excel', file)
   try {
-    await $fetch(`/api/projects/${projectId}/excel`, { method: 'POST', body })
+    await secureFetch(`/api/projects/${projectId}/excel`, { method: 'POST', body })
     await refresh()
     previewKey.value += 1
     if (excelInput.value) excelInput.value.value = ''
@@ -49,7 +48,7 @@ async function toggleArchive() {
   const project = data.value?.project
   if (!project) return
   const action = project.archivedAt ? 'unarchive' : 'archive'
-  await $fetch(`/api/projects/${projectId}/${action}`, { method: 'POST' })
+  await secureFetch(`/api/projects/${projectId}/${action}`, { method: 'POST' })
   if (action === 'archive') await navigateTo('/')
   else await refresh()
 }

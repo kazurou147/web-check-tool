@@ -17,6 +17,7 @@ export interface TagNetworkObservation {
 
 export interface GoogleTagCheckInput {
   pageUrl: string
+  pageUrlIdentity?: string
   pageNames: string[]
   sourceRows: number[]
   rawHtml: string
@@ -46,6 +47,7 @@ export function checkGoogleTags(input: GoogleTagCheckInput): GoogleTagCheckResul
   const network = buildNetworkDetections(input.pageUrl, input.network, directGoogleTagIds)
   const renderedIds = extractIds(input.renderedHtml)
   const detections = mergeDetections([...direct, ...network])
+  if (input.pageUrlIdentity) detections.forEach(detection => { detection.pageUrlIdentity = input.pageUrlIdentity })
   const directIds = new Set(direct.map(detection => detection.id))
   for (const detection of detections) {
     if (detection.detectionMethod === 'network' && directIds.has(detection.id)) {
@@ -119,6 +121,7 @@ export function checkGoogleTags(input: GoogleTagCheckInput): GoogleTagCheckResul
   for (const id of renderedIds) {
     if (detectedIds.has(id)) continue
     const detection = createDetection(input.pageUrl, id, 'network', 'unknown', ['描画後DOMで検出（元HTML・通信の根拠なし）'], 1)
+    if (input.pageUrlIdentity) detection.pageUrlIdentity = input.pageUrlIdentity
     detection.verdict = 'needs_review'
     detection.verdictReason = '描画後DOMだけでは直接設置かGTM経由かを特定できません。'
     detections.push(detection)

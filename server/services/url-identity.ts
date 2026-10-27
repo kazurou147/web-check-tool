@@ -10,6 +10,7 @@ import { normalizeHttpUrlForIdentity } from '~/shared/security/url-security'
 export const URL_IDENTITY_ALGORITHM = 'HMAC-SHA256'
 export const URL_IDENTITY_VERSION = 'url-hmac-v1'
 export const URL_IDENTITY_KEY_FILE = '.url-identity-key'
+export const URL_IDENTITY_INITIALIZED_FILE = '.url-identity-key.initialized'
 const KEY_BYTES = 32
 const DERIVATION_CONTEXT = 'website-delivery-checker:url-identity-key:v1'
 const IDENTITY_CONTEXT = 'website-delivery-checker:url-identity:v1'
@@ -56,6 +57,44 @@ export async function loadUrlIdentityKey(dataDir: string): Promise<Buffer> {
       SECURITY_ERROR_CODES.urlIdentityKeyIoFailed,
       'URL識別鍵を読み込めませんでした。',
     )
+  }
+}
+
+/**
+ * Security-C導入時または新規DATA_DIRで一度だけ鍵を作成します。
+ * 初期化マーカーがある状態で鍵だけが欠落した場合は再生成せず停止します。
+ */
+export async function initializeUrlIdentityKey(dataDir: string, masterKey?: string): Promise<Buffer> {
+  try {
+    const existing = await loadUrlIdentityKey(dataDir)
+    await ensureInitializedMarker(dataDir)
+    return existing
+  } catch (error) {
+    if (!(error instanceof SecurityFoundationError) || error.code !== SECURITY_ERROR_CODES.urlIdentityKeyMissing) throw error
+  }
+  try {
+    await readFile(join(dataDir, URL_IDENTITY_INITIALIZED_FILE), 'utf8')
+    throw new SecurityFoundationError(
+      SECURITY_ERROR_CODES.urlIdentityKeyMissing,
+      '初期化済みのURL識別鍵が見つかりません。バックアップから復元してください。',
+    )
+  } catch (error) {
+    if (error instanceof SecurityFoundationError) throw error
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new SecurityFoundationError(SECURITY_ERROR_CODES.urlIdentityKeyIoFailed, 'URL識別鍵の初期化状態を確認できませんでした。')
+    }
+  }
+  try {
+    const created = await createUrlIdentityKey(dataDir, masterKey)
+    await ensureInitializedMarker(dataDir)
+    return created
+  } catch (error) {
+    if (error instanceof SecurityFoundationError && error.code === SECURITY_ERROR_CODES.urlIdentityKeyExists) {
+      const existing = await loadUrlIdentityKey(dataDir)
+      await ensureInitializedMarker(dataDir)
+      return existing
+    }
+    throw error
   }
 }
 
@@ -122,5 +161,16 @@ function assertKey(key: Uint8Array): void {
       SECURITY_ERROR_CODES.urlIdentityKeyInvalid,
       'URL識別鍵は32バイトである必要があります。',
     )
+  }
+}
+
+async function ensureInitializedMarker(dataDir: string): Promise<void> {
+  await mkdir(dataDir, { recursive: true })
+  try {
+    await writeFile(join(dataDir, URL_IDENTITY_INITIALIZED_FILE), 'initialized\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw new SecurityFoundationError(SECURITY_ERROR_CODES.urlIdentityKeyIoFailed, 'URL識別鍵の初期化状態を保存できませんでした。')
+    }
   }
 }

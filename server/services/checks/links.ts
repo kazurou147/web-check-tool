@@ -1,6 +1,9 @@
 import type { LinkKind, LinkResult, Verdict } from '~/shared/types/run'
 import { NetworkPolicy, NetworkPolicyError } from '../network-policy'
 import { isAbortError, RunCanceledError, throwIfAborted } from '../abort'
+import { maskUrlForDisplay } from '~/shared/security/url-security'
+import { maskSecretText } from '../ai-masking'
+import { createUrlIdentity } from '../url-identity'
 
 export interface CapturedLink {
   href: string
@@ -88,15 +91,20 @@ export async function checkLinks(
   probe: LinkProbe,
   signal?: AbortSignal,
   documentUrl = pageUrl,
+  identityKey?: Uint8Array,
 ): Promise<LinkResult[]> {
   const cache = new Map<string, Promise<HttpProbeResult>>()
   return Promise.all(links.map(async (link, index) => {
-    const key = `${redactUrl(pageUrl)}|link|${index}|${redactUrl(link.resolvedUrl || link.href)}`
+    const pageUrlIdentity = identityKey ? optionalIdentity(pageUrl, identityKey) : undefined
+    const targetUrlIdentity = identityKey ? optionalIdentity(link.resolvedUrl || link.href, identityKey) : undefined
+    const key = `${pageUrlIdentity ?? redactUrl(pageUrl)}|link|${index}|${targetUrlIdentity ?? redactUrl(link.resolvedUrl || link.href)}`
     const base = {
       key,
       pageUrl,
+      ...(pageUrlIdentity ? { pageUrlIdentity } : {}),
       href: redactUrl(link.href),
       resolvedUrl: link.resolvedUrl ? redactUrl(link.resolvedUrl) : undefined,
+      ...(targetUrlIdentity ? { targetUrlIdentity } : {}),
       redirectCount: 0,
       isImageLink: link.isImageLink,
       evidence: [] as string[],
@@ -171,6 +179,7 @@ export async function checkLinks(
         status: response.status,
         contentType: response.contentType,
         finalUrl: redactUrl(response.finalUrl),
+        ...(identityKey && optionalIdentity(response.finalUrl, identityKey) ? { finalUrlIdentity: optionalIdentity(response.finalUrl, identityKey) } : {}),
         redirectCount: response.redirectCount,
         message,
         evidence,
@@ -185,6 +194,14 @@ export async function checkLinks(
       return result(base, kind, 'ng', message)
     }
   }))
+}
+
+function optionalIdentity(value: string, key: Uint8Array): string | undefined {
+  try {
+    return createUrlIdentity(value, key)
+  } catch {
+    return undefined
+  }
 }
 
 export function verdictForStatus(status: number): Verdict {
@@ -252,16 +269,8 @@ async function readLimitedText(response: Response, maxBytes: number): Promise<st
 
 export function redactUrl(value: string): string {
   try {
-    const url = new URL(value)
-    url.username = ''
-    url.password = ''
-    for (const key of [...url.searchParams.keys()]) {
-      if (/token|key|secret|auth|password|passwd|session|email|user/i.test(key)) {
-        url.searchParams.set(key, '[REDACTED]')
-      }
-    }
-    return url.href.slice(0, 4_096)
+    return maskUrlForDisplay(value).value.slice(0, 4_096)
   } catch {
-    return value.slice(0, 4_096)
+    return maskSecretText(value).value.slice(0, 4_096)
   }
 }

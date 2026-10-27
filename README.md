@@ -1,6 +1,6 @@
 # Webサイト納品前チェックツール
 
-Windows 11上で自分専用に使う、Nuxt 3製のローカルWebアプリです。仕様書Ver.1.3に基づき、案件管理、Excel入力、Webサイト機械検査、進捗・結果・履歴表示、任意のAIリンク内容判定、Excelレポート出力、全URL再実行、安全化JSON出力に対応しています。
+Windows 11上で自分専用に使う、Nuxt 3製のローカルWebアプリです。仕様書Ver.1.4に基づき、案件管理、Excel入力、Webサイト機械検査、進捗・結果・履歴表示、任意のAIリンク内容判定、Excelレポート出力、全URL再実行、安全化JSON出力に対応しています。
 
 ## 必要環境
 
@@ -22,6 +22,7 @@ Windows 11上で自分専用に使う、Nuxt 3製のローカルWebアプリで�
 
 - `npm run dev`: 127.0.0.1限定で開発起動
 - `npm run build`: 本番ビルド
+- `npm run start`: ビルド済みサーバーを127.0.0.1限定で起動
 - `npm run typecheck`: TypeScript検査
 - `npm test`: 単体テスト
 - `npm run playwright:install`: 検査用Chromiumをインストール
@@ -30,11 +31,13 @@ Windows 11上で自分専用に使う、Nuxt 3製のローカルWebアプリで�
 
 案件は `DATA_DIR`（初期値 `./data`）の `projects/<UUID>/` に保存します。Excel原本は変更せず、`input/current.xlsx` にコピーします。認証情報は `APP_ENCRYPTION_KEY` を使ったAES-256-GCMで `secrets.enc.json` に分離保存します。検査結果は `runs/<runId>/` の `input-snapshot.json`、`result.json`、`events.jsonl` へ保存し、ページ完了ごとに `result.json` を更新します。
 
-`data/`、`.env`、生成物、認証状態はGit対象外です。案件削除機能はありません。アーカイブは `project.json` の日時だけを変更し、Excelや履歴を移動・削除しません。
+`data/`、`.env`、生成物、認証状態はGit対象外です。フォーム認証URLに検出可能なuserinfoや秘密クエリがある場合、その元URLも`secrets.enc.json`へ暗号化分離し、`project.json`と画面にはマスク済みURLだけを保持します。案件削除機能はありません。アーカイブは `project.json` の日時だけを変更し、Excelや履歴を移動・削除しません。
 
-Security-Aでは、URL同一性を秘密値を含めず照合するための用途分離されたHMAC-SHA-256鍵を定義しています。鍵は明示的な初期化時に `DATA_DIR/.url-identity-key` へ保存し、AI入力署名用の `.ai-signing-key` とは共用しません。鍵はDATA_DIRのバックアップへ必ず含めてください。欠落時は自動再生成せず、既存URLと異なる識別子が黙って作られることを防ぎます。Windowsではファイルモードだけに依存せず、DATA_DIRを現在の利用者だけが読み取れる場所に置いてください。
+URL同一性を秘密値を含めず照合するため、用途分離されたHMAC-SHA-256鍵を `DATA_DIR/.url-identity-key` に保存します。AI入力署名用の `.ai-signing-key` とは共用しません。初回起動時だけ初期化し、初期化済みマーカーがある状態で鍵が欠落した場合は再生成せず安全に停止します。鍵と `.url-identity-key.initialized` はDATA_DIRのバックアップへ必ず含めてください。Windowsではファイルモードだけに依存せず、DATA_DIRを現在の利用者だけが読み取れる場所に置いてください。
 
-URLの表示用マスキングは、既知のuserinfoおよび `token`、`key`、`secret`、`auth`、`password`、`session`、`sid`、`cookie`、`api_key`、`access_token`、`refresh_token` と一般的な表記揺れを対象にします。自動判定ですべての秘密情報を検出できる保証はないため、共有・出力前の確認は引き続き必要です。Security-Aでは共通基盤だけを追加し、既存保存形式と実行時の挙動は変更していません。
+URLの表示用マスキングは、既知のuserinfoおよび `token`、`key`、`secret`、`auth`、`password`、`session`、`sid`、`cookie`、`api_key`、`access_token`、`refresh_token` と一般的な表記揺れを対象にします。新規runでは元URLを実行中のメモリだけで扱い、入力スナップショット、結果、イベントにはマスク済みURLとHMAC識別子を保存します。旧履歴ファイルは書き換えず、API応答時に安全化します。自動判定ですべての秘密情報を検出できる保証はないため、共有・出力前の確認は引き続き必要です。
+
+ローカルAPIはHostを`127.0.0.1`へ限定し、同一Origin、Fetch Metadata、CSRFトークン、API用途別Content-Typeを検証します。開発・本番起動ともサーバーは`127.0.0.1`へバインドし、別OriginのWebサイトからの操作を拒否します。CSRFトークンは同じ保護境界内のGET APIからだけ取得し、変更APIのリクエストヘッダーで送信します。
 
 ## Excel入力
 

@@ -53,6 +53,7 @@ export interface ProjectListItem extends ProjectView {
 export interface ProjectSecrets {
   basic?: { username: string; password: string }
   form?: { username: string; password: string }
+  protectedUrls?: { loginUrl?: string; successUrlPattern?: string }
 }
 
 export interface ProjectMutationInput {

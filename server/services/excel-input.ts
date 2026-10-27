@@ -108,7 +108,7 @@ export function parseExcelWorkbook(workbook: ExcelJS.Workbook, sourceFileName: s
           row: rowNumber,
           column: 'B',
           cell: `B${rowNumber}`,
-          message: `${rowNumber}行目のURL「${urlText}」は有効なHTTP/HTTPS URLではないため除外しました。`,
+          message: `${rowNumber}行目のURLは有効なHTTP/HTTPS URLではないため除外しました。`,
         })
         continue
       }

@@ -17,3 +17,4 @@ coverage/
 .instance-lock/
 .ai-signing-key
 .url-identity-key
+.url-identity-key.initialized

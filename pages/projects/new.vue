@@ -8,7 +8,7 @@ async function create(payload: ProjectMutationInput) {
   submitting.value = true
   message.value = ''
   try {
-    const response = await $fetch<{ project: ProjectView }>('/api/projects', { method: 'POST', body: payload })
+    const response = await secureFetch<{ project: ProjectView }>('/api/projects', { method: 'POST', body: payload })
     await navigateTo(`/projects/${response.project.projectId}`)
   } catch (error) {
     message.value = getErrorMessage(error)
