@@ -47,6 +47,22 @@ describe('ProjectStore', () => {
     })
   })
 
+  it('選択中の認証方式に対応する情報がある場合だけ設定済みとする', async () => {
+    const passwordSettings = defaultProjectSettings()
+    passwordSettings.auth.mode = 'password_protected'
+    const passwordProject = await store.create('パスワード保護', passwordSettings)
+    expect((await store.view(passwordProject)).credentialsConfigured).toBe(false)
+    await store.passwordProtectedSecrets.write(passwordProject.projectId, 'plain-password')
+    expect((await store.view(passwordProject)).credentialsConfigured).toBe(true)
+
+    const basicSettings = defaultProjectSettings()
+    basicSettings.auth.mode = 'basic'
+    const basicProject = await store.create('Basic認証', basicSettings)
+    expect((await store.view(basicProject)).credentialsConfigured).toBe(false)
+    await store.vault.write(basicProject.projectId, { basic: { username: 'user', password: 'pass' } })
+    expect((await store.view(basicProject)).credentialsConfigured).toBe(true)
+  })
+
   it('Excelをcurrent.xlsxへコピーし、渡された原本バイト列を変更しない', async () => {
     const project = await store.create('LP', defaultProjectSettings())
     const source = Buffer.from('PK\u0003\u0004fixture-xlsx')

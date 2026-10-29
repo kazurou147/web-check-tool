@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { DuplicateUrlGroup, InputPageRow, InputSnapshot } from '~/shared/types/excel-input'
-import type { Project, ProjectSecrets, ProjectSettings } from '~/shared/types/project'
+import type { Project, ProjectSettings, RuntimeAuthSecrets } from '~/shared/types/project'
 import type { AiInputBundle } from '~/shared/types/ai'
 import { findMatchingAiPriceProfile } from '~/shared/config/ai-pricing'
 import type {
@@ -84,6 +84,9 @@ export class RunEngine {
     const storedProject = await this.dependencies.projectStore.get(projectId)
     const project = structuredClone(storedProject)
     if (project.archivedAt) throw new ArchivedProjectError('アーカイブ中の案件では検査を開始できません')
+    if (project.settings.auth.mode === 'form') {
+      throw new RunInputError('この案件は旧フォーム認証を使用しています。認証方式を再設定してください', 'LEGACY_AUTH_RECONFIGURE_REQUIRED')
+    }
     if (!project.excelFileName) throw new RunInputError('Excelファイルが登録されていません')
     let sourceRun: RunResult | undefined
     let config = createRunConfig(project.settings)
@@ -110,9 +113,6 @@ export class RunEngine {
       project.settings.ai.mode = requestedAiMode
       config.aiMode = requestedAiMode
     }
-    if (project.settings.auth.mode !== 'none' && !await this.dependencies.projectStore.vault.exists(projectId)) {
-      throw new RunInputError('現在の案件に認証情報が保存されていないため検査を開始できません')
-    }
     if (rerun && project.settings.ai.mode === 'api') {
       if (!rerun.confirmPaidApi) throw new RunInputError('APIモードでは有料実行の確認が必要です')
       const apiKey = this.dependencies.openAiApiKey ? this.dependencies.openAiApiKey() : process.env.OPENAI_API_KEY
@@ -129,12 +129,22 @@ export class RunEngine {
     if (input.uniqueUrlCount > SECURITY_LIMITS.uniquePagesPerRun) {
       throw new RunInputError(`固有ページ数は${SECURITY_LIMITS.uniquePagesPerRun}件以下にしてください`, SECURITY_ERROR_CODES.pageLimitReached)
     }
-    const secrets = project.settings.auth.mode === 'none'
-      ? {}
-      : await this.dependencies.projectStore.vault.read(projectId)
-    project.settings = hydrateProjectAuthUrls(project.settings, secrets)
-    if (project.settings.auth.mode !== 'none' && !secrets[project.settings.auth.mode]) {
-      throw new RunInputError('現在の認証モードに対応する認証情報が保存されていません')
+    let secrets: RuntimeAuthSecrets = {}
+    const authMode = project.settings.auth.mode
+    if (authMode === 'password_protected') {
+      if (!await this.dependencies.projectStore.passwordProtectedSecrets.exists(projectId)) {
+        throw new RunInputError('パスワード保護のパスワードが保存されていないため検査を開始できません')
+      }
+      secrets = { password_protected: { password: await this.dependencies.projectStore.passwordProtectedSecrets.read(projectId) } }
+    } else if (authMode !== 'none') {
+      if (!await this.dependencies.projectStore.vault.exists(projectId)) {
+        throw new RunInputError('現在の案件に認証情報が保存されていないため検査を開始できません')
+      }
+      secrets = await this.dependencies.projectStore.vault.read(projectId)
+      project.settings = hydrateProjectAuthUrls(project.settings, secrets)
+      if (!secrets[authMode]) {
+        throw new RunInputError('現在の認証モードに対応する認証情報が保存されていません')
+      }
     }
     const runId = randomUUID()
     const urlIdentityKey = await initializeUrlIdentityKey(this.dependencies.projectStore.dataDir, process.env.APP_ENCRYPTION_KEY)
@@ -214,13 +224,36 @@ export class RunEngine {
       throwIfAborted(signal)
       await this.transition(result, 'reading_input', false, signal)
       await this.transition(result, 'authenticating', true, signal)
-      inspector = await this.dependencies.inspectorFactory({ settings: project.settings, secrets, config: result.configSnapshot })
+      const groups = groupRows(input.pageRows)
+      inspector = await this.dependencies.inspectorFactory({
+        settings: project.settings,
+        secrets,
+        config: result.configSnapshot,
+        authenticationUrl: input.pageRows[0]?.url,
+      })
       abortInspector = () => { void closeInspector().catch(() => undefined) }
       signal?.addEventListener('abort', abortInspector, { once: true })
       throwIfAborted(signal)
-      await inspector.authenticate(signal)
+      try {
+        await inspector.authenticate(signal)
+      } catch (error) {
+        if (error instanceof PageInspectionError && error.code.startsWith('AUTH_')) {
+          const finishedAt = this.dependencies.now().toISOString()
+          result.pages = [...groups.entries()].map(([normalizedUrl, rows]) => buildFailedPageResult(
+            normalizedUrl,
+            rows,
+            result.startedAt ?? result.createdAt,
+            finishedAt,
+            error,
+            createUrlIdentity(normalizedUrl, urlIdentityKey),
+          ))
+          result.summary = summarize(result)
+          result.updatedAt = finishedAt
+          await this.dependencies.runStore.saveResult(result.projectId, result.runId, result)
+        }
+        throw error
+      }
       await this.transition(result, 'checking', false, signal)
-      const groups = groupRows(input.pageRows)
       const queue = [...groups.entries()]
       const workerCount = Math.min(project.settings.pageConcurrency, queue.length)
       const probe = inspector.linkProbe ?? this.dependencies.linkProbeFactory(project.settings, result.configSnapshot)
@@ -647,7 +680,7 @@ function aiPreparationDiagnostic(stage: 'signing_key' | 'bundle_generation'): { 
 
 interface PreparedRun {
   project: Project
-  secrets: ProjectSecrets
+  secrets: RuntimeAuthSecrets
   input: InputSnapshot
   result: RunResult
   urlIdentityKey: Uint8Array

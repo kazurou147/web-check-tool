@@ -6,6 +6,7 @@ import { defaultProjectSettings } from '~/shared/types/project'
 import { projectIdSchema } from './validation'
 import { SecretVault } from './secret-vault'
 import { publicProjectView } from './project-url-security'
+import { PasswordProtectedSecretStore } from './password-protected-secret-store'
 
 export class ArchivedProjectError extends Error {}
 export class ProjectNotFoundError extends Error {}
@@ -13,10 +14,12 @@ export class ProjectNotFoundError extends Error {}
 export class ProjectStore {
   readonly projectsDir: string
   readonly vault: SecretVault
+  readonly passwordProtectedSecrets: PasswordProtectedSecretStore
 
   constructor(readonly dataDir: string = resolveDataDir()) {
     this.projectsDir = join(dataDir, 'projects')
     this.vault = new SecretVault(dataDir)
+    this.passwordProtectedSecrets = new PasswordProtectedSecretStore(dataDir)
   }
 
   private projectDir(projectId: string): string {
@@ -82,7 +85,16 @@ export class ProjectStore {
   }
 
   async view(project: Project): Promise<ProjectView> {
-    return publicProjectView(project, await this.vault.exists(project.projectId))
+    return publicProjectView(project, await this.hasCredentialsForMode(project))
+  }
+
+  private async hasCredentialsForMode(project: Project): Promise<boolean> {
+    const mode = project.settings.auth.mode
+    if (mode === 'none') return false
+    if (mode === 'password_protected') return await this.passwordProtectedSecrets.exists(project.projectId)
+    if (!await this.vault.exists(project.projectId)) return false
+    const secrets = await this.vault.read(project.projectId)
+    return Boolean(secrets[mode])
   }
 
   async list(archived: boolean): Promise<ProjectView[]> {

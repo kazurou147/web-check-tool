@@ -104,26 +104,26 @@ function submit() {
         <select v-model="form.settings.auth.mode">
           <option value="none">なし</option>
           <option value="basic">Basic認証</option>
-          <option value="form">フォーム認証</option>
+          <option value="password_protected">パスワード保護</option>
         </select>
       </label>
 
-      <div v-if="form.settings.auth.mode !== 'none'" class="stack compact">
+      <p v-if="form.settings.auth.mode === 'form'" class="notice error">
+        この案件は廃止された旧フォーム認証を使用しています。検査を再開するには「なし」「Basic認証」「パスワード保護」のいずれかへ再設定してください。保存済みの認証情報は自動削除されません。
+      </p>
+
+      <div v-if="form.settings.auth.mode === 'basic'" class="stack compact">
         <p v-if="project?.credentialsConfigured" class="hint">認証情報は設定済みです。変更する場合だけ再入力してください。</p>
         <div class="field-grid">
-          <label>ユーザー名<input v-model="form.username" autocomplete="off" :required="!project?.credentialsConfigured"></label>
-          <label>パスワード<input v-model="form.password" type="password" autocomplete="new-password" :required="!project?.credentialsConfigured"></label>
+          <label>ユーザー名<input v-model="form.username" autocomplete="off" :required="!(project?.credentialsConfigured && project.settings.auth.mode === 'basic')"></label>
+          <label>パスワード<input v-model="form.password" type="password" autocomplete="new-password" :required="!(project?.credentialsConfigured && project.settings.auth.mode === 'basic')"></label>
         </div>
       </div>
 
-      <div v-if="form.settings.auth.mode === 'form'" class="stack compact">
-        <label>ログインURL<input v-model="form.settings.auth.loginUrl" type="url" required></label>
-        <div class="field-grid">
-          <label>ユーザー名セレクター<input v-model="form.settings.auth.usernameSelector" required></label>
-          <label>パスワードセレクター<input v-model="form.settings.auth.passwordSelector" required></label>
-          <label>送信セレクター<input v-model="form.settings.auth.submitSelector" required></label>
-          <label>成功URLパターン<input v-model="form.settings.auth.successUrlPattern"></label>
-        </div>
+      <div v-if="form.settings.auth.mode === 'password_protected'" class="stack compact">
+        <p v-if="project?.credentialsConfigured && project.settings.auth.mode === 'password_protected'" class="hint">パスワードは設定済みです。変更する場合だけ再入力してください。</p>
+        <label>パスワード<input v-model="form.password" type="password" autocomplete="new-password" :required="!(project?.credentialsConfigured && project.settings.auth.mode === 'password_protected')"></label>
+        <p class="hint">WordPress「Password Protected」プラグインによるサイト全体のパスワード保護に対応します。</p>
       </div>
     </fieldset>
 

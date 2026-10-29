@@ -563,7 +563,7 @@ const aiVerdictLabels: Record<AiVerdict, string> = {
                 <p v-else>比較可能な設定に差はありません。</p>
               </div>
               <p v-if="rerunConfigSource === 'source_run' && result.configSnapshot.authMode !== 'none'" class="notice">
-                認証情報とフォーム認証手順は現在の案件設定を使用します。認証モードが過去runと異なる場合は開始できません。
+                認証情報と認証手順は現在の案件設定を使用します。認証モードが過去runと異なる場合は開始できません。
               </p>
               <p v-if="settings.auth.mode !== 'none' && !credentialsConfigured" class="notice error">現在の案件に認証情報が保存されていないため、再実行を開始できません。</p>
               <fieldset>

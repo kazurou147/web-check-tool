@@ -28,13 +28,15 @@ export function buildProjectMutationInput(form: ProjectFormState): ProjectMutati
     settings: copyProjectSettings(form.settings),
   }
 
-  if (mode !== 'none' && form.username && form.password) {
+  if (mode === 'basic' && form.username && form.password) {
     payload.secrets = {
-      [mode]: {
+      basic: {
         username: form.username,
         password: form.password,
       },
     }
+  } else if (mode === 'password_protected' && form.password) {
+    payload.secrets = { password_protected: { password: form.password } }
   }
 
   return payload

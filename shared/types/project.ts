@@ -2,7 +2,7 @@ import type { AiMode } from './ai'
 import type { RunSummary } from './run'
 import { DEFAULT_AI_MODEL, DEFAULT_AI_PRICE_PROFILE_ID } from '~/shared/config/ai-pricing'
 
-export type AuthMode = 'none' | 'basic' | 'form'
+export type AuthMode = 'none' | 'basic' | 'password_protected' | 'form'
 
 export interface ProjectSettings {
   pageConcurrency: 1 | 2 | 3
@@ -52,14 +52,23 @@ export interface ProjectListItem extends ProjectView {
 
 export interface ProjectSecrets {
   basic?: { username: string; password: string }
+  /** @deprecated 旧フォーム認証案件の読み取り互換専用 */
   form?: { username: string; password: string }
   protectedUrls?: { loginUrl?: string; successUrlPattern?: string }
+}
+
+export interface RuntimeAuthSecrets extends ProjectSecrets {
+  password_protected?: { password: string }
+}
+
+export interface ProjectMutationSecrets extends ProjectSecrets {
+  password_protected?: { password: string }
 }
 
 export interface ProjectMutationInput {
   name: string
   settings: ProjectSettings
-  secrets?: ProjectSecrets
+  secrets?: ProjectMutationSecrets
 }
 
 export const defaultProjectSettings = (): ProjectSettings => ({

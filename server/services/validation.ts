@@ -19,6 +19,14 @@ const authSettingsSchema = z.discriminatedUnion('mode', [
     successUrlPattern: z.string().max(2_048).default(''),
   }),
   z.object({
+    mode: z.literal('password_protected'),
+    loginUrl: z.string().max(2_048).default(''),
+    usernameSelector: z.string().max(500).default(''),
+    passwordSelector: z.string().max(500).default(''),
+    submitSelector: z.string().max(500).default(''),
+    successUrlPattern: z.string().max(2_048).default(''),
+  }),
+  z.object({
     mode: z.literal('form'),
     loginUrl: z.url().max(2_048),
     usernameSelector: z.string().min(1).max(500),
@@ -47,11 +55,16 @@ const credentialsSchema = z.object({
   password: z.string().min(1).max(2_000),
 })
 
+const passwordOnlySchema = z.object({
+  password: z.string().min(1).max(2_000),
+})
+
 export const projectMutationSchema = z.object({
   name: z.string().trim().min(1).max(200),
   settings: projectSettingsSchema,
   secrets: z.object({
     basic: credentialsSchema.optional(),
+    password_protected: passwordOnlySchema.optional(),
     form: credentialsSchema.optional(),
   }).optional(),
 }).superRefine((value, context) => {
@@ -63,11 +76,11 @@ export const projectMutationSchema = z.object({
     })
   }
   const mode = value.settings.auth.mode
-  if (mode !== 'none' && value.secrets && !value.secrets[mode]) {
+  if (mode !== 'none' && mode !== 'form' && value.secrets && !value.secrets[mode]) {
     context.addIssue({
       code: 'custom',
       path: ['secrets', mode],
-      message: `${mode}認証のユーザー名とパスワードが必要です`,
+      message: mode === 'password_protected' ? 'パスワード保護のパスワードが必要です' : 'Basic認証のユーザー名とパスワードが必要です',
     })
   }
 })

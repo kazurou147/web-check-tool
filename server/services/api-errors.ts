@@ -1,5 +1,6 @@
 import { ArchivedProjectError, ProjectNotFoundError } from './project-store'
 import { RunCorruptError, RunNotFoundError, RunTooLargeError } from './run-store'
+import { PasswordProtectedSecretStoreError } from './password-protected-secret-store'
 
 export function toApiError(error: unknown): never {
   if (error instanceof ProjectNotFoundError) {
@@ -16,6 +17,9 @@ export function toApiError(error: unknown): never {
   }
   if (error instanceof RunTooLargeError) {
     throw createError({ statusCode: 413, statusMessage: '指定された検査履歴は読込サイズ上限を超えています' })
+  }
+  if (error instanceof PasswordProtectedSecretStoreError) {
+    throw createError({ statusCode: 500, statusMessage: error.message })
   }
   throw error
 }

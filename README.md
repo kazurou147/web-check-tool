@@ -29,9 +29,9 @@ Windows 11上で自分専用に使う、Nuxt 3製のローカルWebアプリで�
 
 ## データ管理
 
-案件は `DATA_DIR`（初期値 `./data`）の `projects/<UUID>/` に保存します。Excel原本は変更せず、`input/current.xlsx` にコピーします。認証情報は `APP_ENCRYPTION_KEY` を使ったAES-256-GCMで `secrets.enc.json` に分離保存します。検査結果は `runs/<runId>/` の `input-snapshot.json`、`result.json`、`events.jsonl` へ保存し、ページ完了ごとに `result.json` を更新します。
+案件は `DATA_DIR`（初期値 `./data`）の `projects/<UUID>/` に保存します。Excel原本は変更せず、`input/current.xlsx` にコピーします。Basic認証情報は `APP_ENCRYPTION_KEY` を使ったAES-256-GCMで `secrets.enc.json` に分離保存します。検査結果は `runs/<runId>/` の `input-snapshot.json`、`result.json`、`events.jsonl` へ保存し、ページ完了ごとに `result.json` を更新します。
 
-`data/`、`.env`、生成物、認証状態はGit対象外です。フォーム認証URLに検出可能なuserinfoや秘密クエリがある場合、その元URLも`secrets.enc.json`へ暗号化分離し、`project.json`と画面にはマスク済みURLだけを保持します。案件削除機能はありません。アーカイブは `project.json` の日時だけを変更し、Excelや履歴を移動・削除しません。
+`data/`、`.env`、生成物、認証状態はGit対象外です。認証方式は「なし」「Basic認証」「パスワード保護」です。パスワード保護はWordPressの「Password Protected」プラグインが出力するサイト全体の保護フォームを対象とし、パスワードを案件別の `password-protected.secret.json` へ平文で保存します。このファイルはAPI応答や検査結果には含めず、別の認証方式へ変更したときに削除します。DATA_DIRは現在の利用者だけが読み取れる場所に置いてください。旧フォーム認証案件は読み取り互換のため保持しますが、検査前に認証方式の再設定が必要です。保存済みの旧認証情報を自動削除・変換しません。案件削除機能はありません。アーカイブは `project.json` の日時だけを変更し、Excelや履歴を移動・削除しません。
 
 URL同一性を秘密値を含めず照合するため、用途分離されたHMAC-SHA-256鍵を `DATA_DIR/.url-identity-key` に保存します。AI入力署名用の `.ai-signing-key` とは共用しません。初回起動時だけ初期化し、初期化済みマーカーがある状態で鍵が欠落した場合は再生成せず安全に停止します。鍵と `.url-identity-key.initialized` はDATA_DIRのバックアップへ必ず含めてください。Windowsではファイルモードだけに依存せず、DATA_DIRを現在の利用者だけが読み取れる場所に置いてください。
 

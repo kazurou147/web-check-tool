@@ -267,6 +267,86 @@ describe('Security-D egress proxy', () => {
     }
   }, 30_000)
 
+  it('WordPress Password Protected形式でパスワードだけを送信しCookieをdesktop/mobile・リンク検査へ維持する', async () => {
+    const receivedBodies: string[] = []
+    const fixture = await startHttpFixture((request, response) => {
+      const authenticated = request.headers.cookie?.includes('password-protected=accepted')
+      if (request.method === 'POST' && request.url?.startsWith('/?password-protected=login')) {
+        const chunks: Buffer[] = []
+        request.on('data', chunk => chunks.push(Buffer.from(chunk)))
+        return request.once('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8')
+          receivedBodies.push(body)
+          if (new URLSearchParams(body).get('password_protected_pwd') === 'site-pass') {
+            response.writeHead(302, { location: '/page-one', 'set-cookie': 'password-protected=accepted; Path=/; HttpOnly' }).end()
+          } else {
+            response.writeHead(200, { 'content-type': 'text/html' }).end(passwordProtectedLogin('/page-one', 'incorrect password'))
+          }
+        })
+      }
+      if (request.method === 'GET' && request.url?.startsWith('/?password-protected=login')) {
+        return response.writeHead(200, { 'content-type': 'text/html' }).end(passwordProtectedLogin('/page-one'))
+      }
+      if (!authenticated) {
+        const redirectTo = encodeURIComponent(`http://127.0.0.1:${fixture.port}${request.url}`)
+        return response.writeHead(302, { location: `/?password-protected=login&redirect_to=${redirectTo}` }).end()
+      }
+      if (request.url === '/image.svg') return response.writeHead(200, { 'content-type': 'image/svg+xml' }).end('<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>')
+      response.writeHead(200, { 'content-type': 'text/html' }).end(`<title>${request.url === '/page-two' ? 'page-two' : 'page-one'}</title><a href="/page-two">next</a><img src="/image.svg">`)
+    })
+    const settings = defaultProjectSettings()
+    settings.allowedPrivateHosts = ['127.0.0.1']
+    settings.auth.mode = 'password_protected'
+    const authenticationUrl = `http://127.0.0.1:${fixture.port}/page-one`
+    const inspector = await createPlaywrightInspector({
+      settings,
+      secrets: { password_protected: { password: 'site-pass' } },
+      config: fastConfig(settings),
+      authenticationUrl,
+    })
+    try {
+      await inspector.authenticate()
+      const first = await inspector.inspect(authenticationUrl)
+      const second = await inspector.inspect(`http://127.0.0.1:${fixture.port}/page-two`)
+      expect(first.metadata.titles).toEqual(['page-one'])
+      expect(second.metadata.titles).toEqual(['page-two'])
+      expect(first.images.map(item => item.device)).toEqual(['desktop', 'mobile'])
+      await expect(inspector.linkProbe!.probe(`http://127.0.0.1:${fixture.port}/page-two`, false)).resolves.toMatchObject({ status: 200 })
+      expect(receivedBodies).toHaveLength(1)
+      expect(receivedBodies[0]).toContain('password_protected_pwd=site-pass')
+      expect(receivedBodies[0]).not.toContain('username')
+    } finally {
+      await inspector.close()
+    }
+  }, 30_000)
+
+  it('パスワード誤りでは保護画面を通常ページとして検査しない', async () => {
+    const fixture = await startHttpFixture((request, response) => {
+      if (request.method === 'POST') {
+        request.resume()
+        return request.once('end', () => response.writeHead(200, { 'content-type': 'text/html' }).end(passwordProtectedLogin('/protected', 'incorrect password')))
+      }
+      if (request.headers.cookie?.includes('password-protected=accepted')) {
+        return response.writeHead(200, { 'content-type': 'text/html' }).end('<title>real-page</title>')
+      }
+      response.writeHead(200, { 'content-type': 'text/html' }).end(passwordProtectedLogin('/protected'))
+    })
+    const settings = defaultProjectSettings()
+    settings.allowedPrivateHosts = ['127.0.0.1']
+    settings.auth.mode = 'password_protected'
+    const inspector = await createPlaywrightInspector({
+      settings,
+      secrets: { password_protected: { password: 'wrong-pass' } },
+      config: fastConfig(settings),
+      authenticationUrl: `http://127.0.0.1:${fixture.port}/protected`,
+    })
+    try {
+      await expect(inspector.authenticate()).rejects.toMatchObject({ code: 'AUTH_FAILED' })
+    } finally {
+      await inspector.close()
+    }
+  }, 30_000)
+
   it('フォーム認証のPOSTとCookieをdesktop/mobileへメモリ内で引き継ぐ', async () => {
     const fixture = await startHttpFixture((request, response) => {
       if (request.url === '/login' && request.method === 'GET') {
@@ -380,4 +460,8 @@ function rawConnectStatus(port: number, authority: string): Promise<number> {
     })
     socket.once('error', reject)
   })
+}
+
+function passwordProtectedLogin(redirectTo: string, error = ''): string {
+  return `<!doctype html><html><head><title>保護画面</title></head><body class="login-password-protected"><p>${error}</p><form id="loginform" action="/?password-protected=login" method="post"><input id="password_protected_pass" type="password" name="password_protected_pwd"><input type="hidden" name="password-protected" value="login"><input type="hidden" name="redirect_to" value="${redirectTo}"><input id="wp-submit" type="submit" name="wp-submit" value="Log In"></form></body></html>`
 }

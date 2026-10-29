@@ -1,5 +1,5 @@
 import { chromium, devices, type Browser, type BrowserContext, type BrowserContextOptions, type Page, type Request } from 'playwright'
-import type { ProjectSecrets, ProjectSettings } from '~/shared/types/project'
+import type { ProjectSettings, RuntimeAuthSecrets } from '~/shared/types/project'
 import type { ImageDevice, ImageScrollDiagnostics, MobileEmulationSnapshot, SanitizedRunConfig } from '~/shared/types/run'
 import type { CapturedImage } from './checks/images'
 import type { CapturedLink, LinkProbe } from './checks/links'
@@ -84,14 +84,15 @@ export interface WebsiteInspector {
 
 export interface InspectorFactoryInput {
   settings: ProjectSettings
-  secrets: ProjectSecrets
+  secrets: RuntimeAuthSecrets
   config: SanitizedRunConfig
+  authenticationUrl?: string
 }
 
 export type InspectorFactory = (input: InspectorFactoryInput) => Promise<WebsiteInspector>
 
-export const createPlaywrightInspector: InspectorFactory = async ({ settings, secrets, config }) => {
-  return PlaywrightWebsiteInspector.create(settings, secrets, config)
+export const createPlaywrightInspector: InspectorFactory = async ({ settings, secrets, config, authenticationUrl }) => {
+  return PlaywrightWebsiteInspector.create(settings, secrets, config, authenticationUrl)
 }
 
 export class PageInspectionError extends Error {
@@ -108,7 +109,7 @@ export class PageInspectionError extends Error {
 
 class PlaywrightWebsiteInspector implements WebsiteInspector {
   private authenticating = false
-  private readonly loginOrigin: string | null
+  private loginOrigin: string | null
   readonly linkProbe: LinkProbe
 
   private constructor(
@@ -116,17 +117,18 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
     private readonly context: BrowserContext,
     private mobileContext: BrowserContext,
     private readonly settings: ProjectSettings,
-    private readonly secrets: ProjectSecrets,
+    private readonly secrets: RuntimeAuthSecrets,
     private readonly config: SanitizedRunConfig,
     private readonly policy: NetworkPolicy,
     private readonly proxy: EgressProxy,
     linkProbe: LinkProbe,
+    private readonly authenticationUrl?: string,
   ) {
     this.loginOrigin = settings.auth.loginUrl ? safeOrigin(settings.auth.loginUrl) : null
     this.linkProbe = linkProbe
   }
 
-  static async create(settings: ProjectSettings, secrets: ProjectSecrets, config: SanitizedRunConfig): Promise<PlaywrightWebsiteInspector> {
+  static async create(settings: ProjectSettings, secrets: RuntimeAuthSecrets, config: SanitizedRunConfig, authenticationUrl?: string): Promise<PlaywrightWebsiteInspector> {
     const policy = new NetworkPolicy({ allowedPrivateHosts: settings.allowedPrivateHosts })
     const proxy = new EgressProxy({ policy, connectTimeoutMs: config.linkTimeoutMs, idleTimeoutMs: config.navigationTimeoutMs })
     const endpoint = await proxy.start()
@@ -161,7 +163,7 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
         cookieProvider: browserCookieProvider(context),
         ...(httpCredentials ? { basicCredentials: httpCredentials } : {}),
       })
-      const inspector = new PlaywrightWebsiteInspector(browser, context, mobileContext, settings, secrets, config, policy, proxy, linkProbe)
+      const inspector = new PlaywrightWebsiteInspector(browser, context, mobileContext, settings, secrets, config, policy, proxy, linkProbe, authenticationUrl)
       await inspector.hardenContext(context)
       await inspector.hardenContext(mobileContext)
       return inspector
@@ -176,6 +178,10 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
 
   async authenticate(signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal)
+    if (this.settings.auth.mode === 'password_protected') {
+      await this.authenticatePasswordProtected(signal)
+      return
+    }
     if (this.settings.auth.mode !== 'form') return
     const credentials = this.secrets.form
     if (!credentials) throw new PageInspectionError('フォーム認証情報が設定されていません。', 'AUTH_MISSING', false, 0)
@@ -207,6 +213,59 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
       if (error instanceof PageInspectionError) throw error
       throw new PageInspectionError('フォーム認証に失敗しました。', 'AUTH_FAILED', false, 1)
+    } finally {
+      this.authenticating = false
+      await page.close()
+    }
+  }
+
+  private async authenticatePasswordProtected(signal?: AbortSignal): Promise<void> {
+    const credentials = this.secrets.password_protected
+    if (!credentials) throw new PageInspectionError('パスワード保護の認証情報が設定されていません。', 'AUTH_MISSING', false, 0)
+    if (!this.authenticationUrl) throw new PageInspectionError('パスワード保護の認証対象URLを確認できません。', 'AUTH_MISSING', false, 0)
+    await this.policy.assertUrl(this.authenticationUrl)
+    const page = await this.context.newPage()
+    this.authenticating = true
+    try {
+      const response = await page.goto(this.authenticationUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.config.navigationTimeoutMs,
+      })
+      throwIfAborted(signal)
+      if (!response || response.status() >= 400) throw new Error('パスワード保護画面を取得できません')
+      const form = passwordProtectedForm(page)
+      if (await form.count() === 0) return
+      const action = await form.getAttribute('action')
+      const actionUrl = new URL(action || page.url(), page.url())
+      if (!['http:', 'https:'].includes(actionUrl.protocol) || actionUrl.origin !== new URL(page.url()).origin) {
+        throw new PageInspectionError('パスワードの送信先を安全に確認できませんでした。', 'AUTH_UNSAFE_TARGET', false, 1)
+      }
+      await this.policy.assertUrl(actionUrl.href)
+      this.loginOrigin = actionUrl.origin
+      await form.locator('input[name="password_protected_pwd"]').fill(credentials.password)
+      const submit = form.locator('#wp-submit, input[type="submit"][name="wp-submit"], button[type="submit"]').first()
+      if (await submit.count() === 0) throw new Error('ログインボタンを確認できません')
+      await submit.click()
+      throwIfAborted(signal)
+      await page.waitForLoadState('domcontentloaded', { timeout: this.config.navigationTimeoutMs }).catch(() => undefined)
+      const verification = await page.goto(this.authenticationUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.config.navigationTimeoutMs,
+      })
+      throwIfAborted(signal)
+      if (!verification || verification.status() >= 400 || await passwordProtectedForm(page).count() > 0) {
+        throw new PageInspectionError('パスワード保護の認証に失敗しました。', 'AUTH_FAILED', false, 1)
+      }
+      const storageState = await this.context.storageState()
+      throwIfAborted(signal)
+      await this.mobileContext.close()
+      throwIfAborted(signal)
+      this.mobileContext = await this.browser.newContext(createMobileContextOptions(this.config, undefined, storageState))
+      await this.hardenContext(this.mobileContext)
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw new RunCanceledError()
+      if (error instanceof PageInspectionError) throw error
+      throw new PageInspectionError('パスワード保護の認証に失敗しました。', 'AUTH_FAILED', false, 1)
     } finally {
       this.authenticating = false
       await page.close()
@@ -284,6 +343,9 @@ class PlaywrightWebsiteInspector implements WebsiteInspector {
       }
       const rawHtml = rawBody.toString('utf8')
       const renderedHtml = (await page.content()).slice(0, this.config.maxResponseBytes)
+      if (this.settings.auth.mode === 'password_protected' && await passwordProtectedForm(page).count() > 0) {
+        throw new PageInspectionError('パスワード保護画面へ戻されたため認証状態を確認できませんでした。', 'AUTH_FAILED', false, attempt)
+      }
       const metadata = await captureMetadata(page)
       const capturedLinks = await captureLinks(page, (this.settings.ai?.mode ?? 'off') !== 'off')
       const anchorTargets = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[id], a[name]')]
@@ -831,6 +893,10 @@ function safeErrorMessage(error: unknown): string {
   return message
     .replace(/(?:authorization|cookie|password|token|secret)\s*[:=]\s*\S+/gi, '[REDACTED]')
     .slice(0, 1_000)
+}
+
+function passwordProtectedForm(page: Page) {
+  return page.locator('form:has(input[name="password_protected_pwd"])').first()
 }
 
 function safeOrigin(value: string): string | null {

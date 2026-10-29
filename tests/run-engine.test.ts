@@ -67,6 +67,67 @@ describe('Phase 3実行基盤', () => {
     expect(page.httpStatus).toBe(404)
   })
 
+  it('パスワード保護の認証失敗は保護画面を検査せず全ページの個別項目を未確認にする', async () => {
+    const directory = await mkdtemp(join(process.cwd(), '.test-data-password-auth-failure-'))
+    temporaryDirectories.push(directory)
+    const projectStore = new ProjectStore(directory)
+      const settings = defaultProjectSettings()
+      settings.auth.mode = 'password_protected'
+      const project = await projectStore.create('Password Protected fixture', settings)
+      await projectStore.passwordProtectedSecrets.write(project.projectId, 'never-persist-this')
+      const workbook = new ExcelJS.Workbook()
+      const pages = workbook.addWorksheet('納品前のチェック')
+      pages.addRow(['ページ名', 'URL', 'title', 'description'])
+      pages.addRow(['ページ1', 'https://example.com/one', 'Real one', 'Description one'])
+      pages.addRow(['ページ2', 'https://example.com/two', 'Real two', 'Description two'])
+      workbook.addWorksheet('Googleタグ').addRow(['タグ名', '設置コード'])
+      await projectStore.saveExcel(project.projectId, 'fixture.xlsx', new Uint8Array(await workbook.xlsx.writeBuffer()))
+      const inspect = vi.fn(async () => successfulInspection('https://example.com/'))
+      const inspector: WebsiteInspector = {
+        authenticate: async () => { throw new PageInspectionError('パスワード保護の認証に失敗しました。', 'AUTH_FAILED', false, 1) },
+        inspect,
+        close: async () => undefined,
+      }
+      const runStore = new RunStore(projectStore.projectsDir)
+      const engine = new RunEngine({
+        projectStore,
+        runStore,
+        inspectorFactory: async () => inspector,
+        linkProbeFactory: () => ({ probe: async url => ({ requestedUrl: url, finalUrl: url, status: 200, contentType: 'text/html', redirectCount: 0 }) }),
+        now: () => new Date('2026-10-28T00:00:00.000Z'),
+      })
+
+      const result = await engine.execute(await engine.prepare(project.projectId))
+      expect(result.status).toBe('failed')
+      expect(result.fatalError).toMatchObject({ code: 'AUTH_FAILED' })
+      expect(result.pages).toHaveLength(2)
+      expect(result.summary).toMatchObject({ ng: 2, unchecked: 10 })
+      expect(result.pages.flatMap(page => page.findings).filter(item => item.item === 'title' || item.item === 'description').every(item => item.verdict === 'unchecked')).toBe(true)
+      expect(inspect).not.toHaveBeenCalled()
+      expect(JSON.stringify(result)).not.toContain('never-persist-this')
+      const events = await readFile(join(runStore.runDir(project.projectId, result.runId), 'events.jsonl'), 'utf8')
+      expect(events).not.toContain('never-persist-this')
+  })
+
+  it('旧フォーム認証案件は読み込めるが検査開始前に再設定を要求する', async () => {
+    const directory = await mkdtemp(join(process.cwd(), '.test-data-legacy-form-auth-'))
+    temporaryDirectories.push(directory)
+    const projectStore = new ProjectStore(directory)
+    const settings = defaultProjectSettings()
+    settings.auth.mode = 'form'
+    const project = await projectStore.create('旧フォーム認証', settings)
+    const engine = new RunEngine({
+      projectStore,
+      runStore: new RunStore(projectStore.projectsDir),
+      inspectorFactory: async () => { throw new Error('開始してはいけません') },
+      linkProbeFactory: () => ({ probe: async url => ({ requestedUrl: url, finalUrl: url, status: 200, contentType: 'text/html', redirectCount: 0 }) }),
+      now: () => new Date('2026-10-28T00:00:00.000Z'),
+    })
+
+    await expect(engine.prepare(project.projectId)).rejects.toMatchObject({ code: 'LEGACY_AUTH_RECONFIGURE_REQUIRED' })
+    expect((await projectStore.get(project.projectId)).settings.auth.mode).toBe('form')
+  })
+
   it('重複URLを1回だけ取得し、後続ページ失敗前の途中結果を保存する', async () => {
     const directory = await mkdtemp(join(process.cwd(), '.test-data-phase3-run-'))
     temporaryDirectories.push(directory)

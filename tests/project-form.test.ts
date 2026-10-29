@@ -95,4 +95,45 @@ describe('ProjectFormの送信データ', () => {
     expect(project.name).toBe('既存案件')
     expect(project.settings.navigationTimeoutMs).toBe(30_000)
   })
+
+  it('パスワード保護ではユーザー名を送らずパスワードだけを送信する', () => {
+    const form = reactive(createProjectFormState())
+    form.name = 'パスワード保護案件'
+    form.settings.auth.mode = 'password_protected'
+    form.username = '送信しないユーザー名'
+    form.password = 'site-password'
+
+    expect(buildProjectMutationInput(form).secrets).toEqual({
+      password_protected: { password: 'site-password' },
+    })
+  })
+
+  it('旧フォーム認証案件は勝手に変換せず読み込む', () => {
+    const project = reactive<ProjectView>({
+      schemaVersion: 1,
+      projectId: 'b812ed3f-2181-4f74-af45-2bcfa00388fb',
+      name: '旧フォーム認証',
+      createdAt: '2026-10-19T00:00:00.000Z',
+      updatedAt: '2026-10-19T00:00:00.000Z',
+      archivedAt: null,
+      excelFileName: 'input.xlsx',
+      credentialsConfigured: true,
+      settings: {
+        ...createProjectFormState().settings,
+        auth: {
+          mode: 'form',
+          loginUrl: 'https://example.com/login',
+          usernameSelector: '#user',
+          passwordSelector: '#pass',
+          submitSelector: '#submit',
+          successUrlPattern: '/protected',
+        },
+      },
+    })
+
+    const payload = buildProjectMutationInput(createProjectFormState(project))
+    expect(payload.settings.auth.mode).toBe('form')
+    expect(payload.settings.auth.loginUrl).toBe('https://example.com/login')
+    expect(payload.secrets).toBeUndefined()
+  })
 })

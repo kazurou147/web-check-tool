@@ -24,7 +24,7 @@ describe('案件入力検証', () => {
     expect(projectMutationSchema.safeParse({ name: ' ', settings }).success).toBe(false)
   })
 
-  it('フォーム認証の必須セレクターを検証する', () => {
+  it('旧フォーム認証の必須セレクターを読み取り互換のため検証する', () => {
     const settings = defaultProjectSettings()
     settings.auth = {
       mode: 'form',
@@ -35,6 +35,21 @@ describe('案件入力検証', () => {
       successUrlPattern: '',
     }
     expect(projectMutationSchema.safeParse({ name: '案件', settings }).success).toBe(false)
+  })
+
+  it('パスワード保護はパスワードのみを受理する', () => {
+    const settings = defaultProjectSettings()
+    settings.auth.mode = 'password_protected'
+    expect(projectMutationSchema.safeParse({
+      name: '保護案件',
+      settings,
+      secrets: { password_protected: { password: 'site-password' } },
+    }).success).toBe(true)
+    expect(projectMutationSchema.safeParse({
+      name: '保護案件',
+      settings,
+      secrets: { password_protected: { password: '' } },
+    }).success).toBe(false)
   })
 
   it('MANUALと料金設定済みAPIモードを受理する', () => {

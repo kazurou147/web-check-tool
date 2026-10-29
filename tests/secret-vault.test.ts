@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { parseEncryptionKey, SecretVault } from '~/server/services/secret-vault'
+import { PasswordProtectedSecretStore } from '~/server/services/password-protected-secret-store'
 
 describe('SecretVault', () => {
   let dataDir: string
@@ -42,6 +43,18 @@ describe('SecretVault', () => {
     await copyFile(source, destination)
 
     await expect(vault.read(otherId)).rejects.toThrow()
+  })
+
+  it('パスワード保護は暗号鍵なしで専用ファイルへ平文保存する', async () => {
+    const store = new PasswordProtectedSecretStore(dataDir)
+    await store.write(projectId, 'protected-secret')
+    const raw = await readFile(join(dataDir, 'projects', projectId, 'password-protected.secret.json'), 'utf8')
+
+    expect(raw).toContain('protected-secret')
+    expect(await store.read(projectId)).toBe('protected-secret')
+    expect(await store.exists(projectId)).toBe(true)
+    await store.delete(projectId)
+    expect(await store.exists(projectId)).toBe(false)
   })
 
   it('32バイト以外の鍵を拒否する', () => {
