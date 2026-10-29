@@ -14,7 +14,7 @@ import {
   verifyAiInputBundle,
   type AiSourceCandidate,
 } from '~/server/services/ai-input'
-import { maskSensitiveText, maskSensitiveUrl } from '~/server/services/ai-masking'
+import { maskSecretText, maskSensitiveText, maskSensitiveUrl } from '~/server/services/ai-masking'
 import { SafeLinkProbe, type LinkProbe } from '~/server/services/checks/links'
 import { NetworkPolicy } from '~/server/services/network-policy'
 
@@ -70,6 +70,42 @@ describe('Phase 5-A AI入力共通基盤', () => {
     expect(url.value).not.toContain('user:pass')
     expect(url.value).not.toContain('secret')
     expect(url.maskedCategories).toEqual(expect.arrayContaining(['url_credentials', 'url_query_secret']))
+  })
+
+  it.each([
+    'https://dcmh.test-kazurou147.biz/wp-content/themes/dcmh/img/logo.png',
+    'https://dcmh.test-kazurou147.biz/wp-content/uploads/2026/10/very-long-descriptive-image-file-name-for-delivery-check.jpeg',
+    'https://cdn.example.com/assets/0123456789abcdef0123456789abcdef0123456789abcdef.svg',
+    'https://cdn.example.com/assets/hero-image.webp',
+    'https://cdn.example.com/assets/photo.avif',
+  ])('本文中の通常画像URLを高エントロピー値としてマスクしない: %s', (imageUrl) => {
+    const masked = maskSecretText(`desktop ${imageUrl}: 画像の通信エラーを確認しました。`)
+
+    expect(masked.value).toContain(imageUrl)
+    expect(masked.value).not.toContain('[MASKED_HIGH_ENTROPY]')
+  })
+
+  it('本文中の画像URLでもユーザー情報・秘密クエリ・署名パラメータだけを保護する', () => {
+    const imageUrl = 'https://user:pass@cdn.example.com/assets/0123456789abcdef0123456789abcdef0123456789abcdef.png?size=large&token=plain-secret&X-Amz-Credential=AKIAEXAMPLE&X-Amz-Signature=signed-secret-value'
+    const masked = maskSecretText(`desktop ${imageUrl}: 画像の通信エラーを確認しました。`)
+
+    expect(masked.value).toContain('cdn.example.com/assets/0123456789abcdef0123456789abcdef0123456789abcdef.png')
+    expect(masked.value).toContain('size=large')
+    expect(masked.value).not.toContain('user:pass')
+    expect(masked.value).not.toContain('plain-secret')
+    expect(masked.value).not.toContain('AKIAEXAMPLE')
+    expect(masked.value).not.toContain('signed-secret-value')
+    expect(masked.maskedCategories).toContain('url_credentials')
+    expect(masked.maskedCategories).toContain('url_query_secret')
+  })
+
+  it('URLマスキングを繰り返しても通常パスを損なわない', () => {
+    const imageUrl = 'https://cdn.example.com/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.webp?token=secret'
+    const once = maskSecretText(imageUrl).value
+    const twice = maskSecretText(once).value
+
+    expect(twice).toBe(once)
+    expect(twice).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.webp')
   })
 
   it('上限長の文章がマスキングで伸長しても、マスキング後の値を契約上限へ収める', async () => {

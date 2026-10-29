@@ -146,11 +146,17 @@ describe('Security-C URL秘密情報保護', () => {
   it('旧履歴はディスクを変更せずAPI表示用コピーだけを安全化する', () => {
     const input = fixtureInput('https://example.com/?access_token=legacy-secret', 'https://example.com/other')
     const legacy = fixtureResult(input)
+    const imageUrl = 'https://dcmh.test-kazurou147.biz/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.webp?width=1200&token=image-legacy-secret'
+    legacy.images[0]!.imageUrl = imageUrl
+    legacy.pages[0]!.findings[0]!.evidence = [`desktop ${imageUrl}: 画像の通信エラーを確認しました。`]
     legacy.fatalError = { code: 'FIXTURE', message: 'request https://example.com/?key=hidden-value failed', retryable: false }
     const before = JSON.stringify(legacy)
     const publicResult = secureRunForPublic(legacy)
     expect(JSON.stringify(publicResult)).not.toContain('legacy-secret')
     expect(JSON.stringify(publicResult)).not.toContain('hidden-value')
+    expect(publicResult.images[0]?.imageUrl).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.webp')
+    expect(publicResult.pages[0]?.findings[0]?.evidence?.[0]).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.webp')
+    expect(JSON.stringify(publicResult)).not.toContain('[MASKED_HIGH_ENTROPY]')
     expect(JSON.stringify(legacy)).toBe(before)
   })
 

@@ -1,4 +1,5 @@
 import type { AiMaskingSummary } from '~/shared/types/ai'
+import { isSensitiveQueryName } from '~/shared/security/url-security'
 
 export const AI_MASKING_RULE_VERSION = '1.0.0'
 export const AI_MASKING_NOTICE = '自動マスキングは、すべての個人情報や秘密情報の検出を保証するものではありません。外部判定前に内容を確認してください。'
@@ -112,19 +113,37 @@ function maskSensitiveTextCore(value: string, maskUrls: boolean, maskPersonal = 
       return `${key}=[MASKED_SECRET]`
     },
   )
-  output = replace(
-    output,
+  output = maskHighEntropyOutsideUrls(output, tracker)
+
+  return tracker.result(output)
+}
+
+function maskHighEntropyOutsideUrls(value: string, tracker: ReturnType<typeof createTracker>): string {
+  const urlPattern = /\bhttps?:\/\/[^\s<>"'|]+/giu
+  let output = ''
+  let offset = 0
+  for (const matched of value.matchAll(urlPattern)) {
+    const index = matched.index
+    output += maskHighEntropy(value.slice(offset, index), tracker)
+    output += matched[0]
+    offset = index + matched[0].length
+  }
+  return output + maskHighEntropy(value.slice(offset), tracker)
+}
+
+function maskHighEntropy(value: string, tracker: ReturnType<typeof createTracker>): string {
+  return replace(
+    value,
     /(?=\b[A-Za-z0-9+/_=-]{40,}\b)(?=[A-Za-z0-9+/_=-]*[A-Za-z])(?=[A-Za-z0-9+/_=-]*\d)[A-Za-z0-9+/_=-]+/gu,
     '[MASKED_HIGH_ENTROPY]',
     'high_entropy',
     tracker,
   )
-
-  return tracker.result(output)
 }
 
 function isSensitiveKey(value: string): boolean {
-  return /(?:^|[_-])(?:token|key|secret|auth|authorization|password|passwd|session|sessionid|sid|cookie|email|user)(?:$|[_-])/iu.test(value)
+  return isSensitiveQueryName(value)
+    || /(?:^|[_-])(?:email|user)(?:$|[_-])/iu.test(value)
 }
 
 function replace(

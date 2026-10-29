@@ -103,6 +103,23 @@ describe('Phase 6 Excelレポート', () => {
     })
   })
 
+  it('画像URLの通常パスをExcelへ維持し、秘密クエリだけをマスクする', async () => {
+    const result = makeRun('off')
+    const imageUrl = 'https://cdn.example.com/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.jpeg?width=1200&X-Amz-Signature=signed-secret-value'
+    result.images[0]!.imageUrl = imageUrl
+    result.images[0]!.evidence = [`desktop ${imageUrl}: 画像の通信エラーを確認しました。`]
+    const workbook = await loadReport(makeProject(), result)
+    const all = workbook.getWorksheet(REPORT_SHEET_NAMES.all)!
+    const imageRow = findRow(all, '安定キー', 'image-mobile')
+    const url = String((imageRow.getCell(columnNumber(all, 'URL')).value as ExcelJS.CellHyperlinkValue).text)
+    const evidence = String(imageRow.getCell(columnNumber(all, '根拠')).value)
+
+    expect(url).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.jpeg')
+    expect(evidence).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.jpeg')
+    expect(`${url}\n${evidence}`).not.toContain('signed-secret-value')
+    expect(`${url}\n${evidence}`).not.toContain('[MASKED_HIGH_ENTROPY]')
+  })
+
   it('半角・全角スペースの差を要約し、期待値と実測値を変更しない', async () => {
     const result = makeRun('off')
     const finding = result.pages[0]!.findings.find(item => item.item === 'title')!

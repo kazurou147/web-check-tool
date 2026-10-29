@@ -35,6 +35,7 @@ describe('Security-A URL安全化', () => {
     'token', 'TOKEN', 'access_token', 'access-token', 'accessToken',
     'refresh_token', 'refreshToken', 'api_key', 'api-key', 'apiKey',
     'key', 'secret', 'auth', 'password', 'session', 'session_id', 'sid', 'cookie',
+    'signature', 'sig', 'credential', 'policy', 'X-Amz-Credential', 'X-Amz-Signature',
   ])('%sを秘密クエリ名として扱う', (name) => {
     expect(isSensitiveQueryName(name)).toBe(true)
   })
@@ -82,6 +83,17 @@ describe('Security-A URL安全化', () => {
     expect(masked.maskedCount).toBe(0)
     expect(masked.value).toContain('monkey=banana')
     expect(masked.notice).toContain('すべての秘密情報を検出できることを保証しません')
+  })
+
+  it('署名付きURLの認証パラメータをマスクし、通常の画像パスと拡張子を維持する', () => {
+    const original = 'https://cdn.example.com/assets/0123456789abcdef0123456789abcdef0123456789abcdef.webp?width=1200&X-Amz-Credential=AKIAEXAMPLE&X-Amz-Signature=abcdef123456'
+    const masked = maskUrlForDisplay(original)
+
+    expect(masked.value).toContain('/assets/0123456789abcdef0123456789abcdef0123456789abcdef.webp')
+    expect(masked.value).toContain('width=1200')
+    expect(masked.value).not.toContain('AKIAEXAMPLE')
+    expect(masked.value).not.toContain('abcdef123456')
+    expect(masked.sensitiveQueryNames).toEqual(['X-Amz-Credential', 'X-Amz-Signature'])
   })
 
   it('識別用正規化は既存規則どおりHTTP/HTTPSを限定しフラグメントだけを除去する', () => {

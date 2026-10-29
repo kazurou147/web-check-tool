@@ -17,6 +17,10 @@ const SENSITIVE_SINGLE_PARTS = new Set([
   'sid',
   'cookie',
   'cid',
+  'signature',
+  'sig',
+  'credential',
+  'policy',
 ])
 
 const SENSITIVE_COMBINATIONS = new Set([

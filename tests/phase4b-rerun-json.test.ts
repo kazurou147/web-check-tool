@@ -120,7 +120,13 @@ describe('Phase 4-B JSON結果エクスポート', () => {
   it('allowlist形式で秘密だけをマスクし、連絡先と元resultを維持する', async () => {
     const fixture = await createFixture('json', ['https://user:pass@example.com/?token=secret&view=1'])
     const prepared = await fixture.engine.prepare(fixture.projectId)
+    const imageUrl = 'https://cdn.example.com/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.svg?width=1200&X-Amz-Signature=signed-secret-value'
     prepared.result.status = 'interrupted'
+    prepared.result.images.push({
+      key: 'image-json', pageUrl: 'https://example.com/', device: 'desktop', imageUrl,
+      sourceKind: 'img', location: 'img.hero', verdict: 'ng', message: '画像の通信エラーを確認しました。',
+      evidence: [`desktop ${imageUrl}: 画像の通信エラーを確認しました。`],
+    })
     prepared.result.fatalError = {
       code: 'SAFE',
       message: 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456\nJWT eyJabcdefghijk.abcdefghijk.abcdefghijk / sk-abcdefghijklmnop123456\n連絡先 contact@example.com / 03-1234-5678',
@@ -140,6 +146,11 @@ describe('Phase 4-B JSON結果エクスポート', () => {
     expect(exported.result.fatalError.message).not.toContain('sk-abcdefghijklmnop')
     expect(exported.result.fatalError.message).toContain('contact@example.com')
     expect(exported.result.fatalError.message).toContain('03-1234-5678')
+    expect(exported.result.images[0].imageUrl).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.svg')
+    expect(exported.result.images[0].evidence[0]).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.svg')
+    expect(JSON.stringify(exported.result.images[0])).not.toContain('signed-secret-value')
+    expect(exported.result.images[0].imageUrl).not.toContain('[MASKED_HIGH_ENTROPY]')
+    expect(exported.result.images[0].evidence[0]).not.toContain('[MASKED_HIGH_ENTROPY]')
     expect(hash(await readFile(path))).toBe(before)
   })
 
