@@ -32,6 +32,21 @@ describe('リンク検査', () => {
 
     expect(results.map(item => item.verdict)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok', 'needs_review'])
     expect(results[0].isImageLink).toBe(true)
+    expect(results[4]).toMatchObject({ href: 'tel:+81-3-1234-5678', resolvedUrl: 'tel:+81-3-1234-5678', kind: 'tel' })
+  })
+
+  it('国内tel番号の表記を維持し、不正なtel URLの電話番号と秘密値は保護する', async () => {
+    const results = await checkLinks('https://example.com/', [
+      { href: 'tel:03-1234-5678', resolvedUrl: 'tel:03-1234-5678', text: '03-1234-5678', isImageLink: false },
+      { href: 'tel:0312345678', resolvedUrl: 'tel:0312345678', text: '0312345678', isImageLink: false },
+      { href: 'tel:03-1234-5678?token=plain-secret', resolvedUrl: 'tel:03-1234-5678?token=plain-secret', text: '不正', isImageLink: false },
+    ], new Set(), { probe: async () => { throw new Error('not reached') } })
+
+    expect(results[0]).toMatchObject({ href: 'tel:03-1234-5678', kind: 'tel', verdict: 'ok' })
+    expect(results[1]).toMatchObject({ href: 'tel:0312345678', kind: 'tel', verdict: 'ok' })
+    expect(results[2]).toMatchObject({ kind: 'tel', verdict: 'ng' })
+    expect(results[2]!.href).not.toContain('03-1234-5678')
+    expect(results[2]!.href).not.toContain('plain-secret')
   })
 
   it('リダイレクトごとにSSRFを検証して私設IPを拒否する', async () => {

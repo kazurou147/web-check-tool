@@ -117,6 +117,11 @@ describe('Security-C URL秘密情報保護', () => {
     const second = 'https://example.com/page?token=beta-secret&safe=1'
     const input = fixtureInput(first, second)
     const result = fixtureResult(input)
+    result.links.push({
+      key: `url-hmac-v1:${'a'.repeat(64)}|link|1|tel:+81-3-1234-5678`, pageUrl: first,
+      href: 'tel:+81-3-1234-5678', resolvedUrl: 'tel:+81-3-1234-5678', kind: 'tel', verdict: 'ok',
+      redirectCount: 0, isImageLink: false, message: 'tel形式を確認しました。', evidence: [],
+    })
     await mkdir(join(dataDir, 'projects', projectId, 'runs'), { recursive: true })
     await store.create(projectId, runId, input, result)
     await store.appendEvent(projectId, runId, { at: new Date(0).toISOString(), type: 'page_completed', url: first })
@@ -139,6 +144,12 @@ describe('Security-C URL秘密情報保護', () => {
     expect(saved.pages[0]?.urlIdentity).toBe(saved.input.pageRows[0]?.urlIdentity)
     expect(saved.links[0]?.targetUrlIdentity).toMatch(/^url-hmac-v1:/)
     expect(saved.links[0]?.finalUrlIdentity).toMatch(/^url-hmac-v1:/)
+    expect(saved.links[1]).toMatchObject({
+      href: 'tel:+81-3-1234-5678',
+      resolvedUrl: 'tel:+81-3-1234-5678',
+    })
+    expect(saved.links[1]?.targetUrlIdentity).toBeUndefined()
+    expect(saved.links[1]?.key).toContain('tel:+81-3-1234-5678')
     expect(saved.images[0]?.imageUrlIdentity).toMatch(/^url-hmac-v1:/)
     expect(input.pageRows[0]?.url).toBe(first)
   })
@@ -148,6 +159,11 @@ describe('Security-C URL秘密情報保護', () => {
     const legacy = fixtureResult(input)
     const imageUrl = 'https://dcmh.test-kazurou147.biz/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.webp?width=1200&token=image-legacy-secret'
     legacy.images[0]!.imageUrl = imageUrl
+    legacy.links.push({
+      key: 'legacy|link|tel:03-1234-5678', pageUrl: legacy.pages[0]!.normalizedUrl,
+      href: 'tel:03-1234-5678', resolvedUrl: 'tel:03-1234-5678', kind: 'tel', verdict: 'ok',
+      redirectCount: 0, isImageLink: false, message: 'tel形式を確認しました。', evidence: [],
+    })
     legacy.pages[0]!.findings[0]!.evidence = [`desktop ${imageUrl}: 画像の通信エラーを確認しました。`]
     legacy.fatalError = { code: 'FIXTURE', message: 'request https://example.com/?key=hidden-value failed', retryable: false }
     const before = JSON.stringify(legacy)
@@ -156,6 +172,7 @@ describe('Security-C URL秘密情報保護', () => {
     expect(JSON.stringify(publicResult)).not.toContain('hidden-value')
     expect(publicResult.images[0]?.imageUrl).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.webp')
     expect(publicResult.pages[0]?.findings[0]?.evidence?.[0]).toContain('/wp-content/uploads/0123456789abcdef0123456789abcdef0123456789abcdef.webp')
+    expect(publicResult.links[1]).toMatchObject({ href: 'tel:03-1234-5678', resolvedUrl: 'tel:03-1234-5678' })
     expect(JSON.stringify(publicResult)).not.toContain('[MASKED_HIGH_ENTROPY]')
     expect(JSON.stringify(legacy)).toBe(before)
   })

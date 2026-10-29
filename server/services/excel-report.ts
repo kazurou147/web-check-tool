@@ -28,7 +28,7 @@ import type {
 import { compareText, visibleText } from '~/shared/utils/run-display'
 import { manualAiCounts } from '~/shared/utils/manual-ai'
 import { maskUrlForDisplay } from '~/shared/security/url-security'
-import { maskSecretText } from './ai-masking'
+import { maskSecretText, maskSensitiveUrl } from './ai-masking'
 import { secureRunForPublic } from './persistence-security'
 import { SECURITY_ERROR_CODES, SECURITY_LIMITS, SecurityFoundationError } from '~/shared/security/security-constants'
 
@@ -147,6 +147,7 @@ export function safeHttpHyperlink(value: string): string | undefined {
 }
 
 export function redactReportUrl(value: string): string {
+  if (/^tel:/iu.test(value)) return maskSensitiveUrl(value).value
   try {
     const url = new URL(maskUrlForDisplay(value).value)
     url.username = ''

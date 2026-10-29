@@ -120,6 +120,22 @@ describe('Phase 6 Excelレポート', () => {
     expect(`${url}\n${evidence}`).not.toContain('[MASKED_HIGH_ENTROPY]')
   })
 
+  it('telリンクの元表記をExcelへ維持し、不正なtel URLはマスクする', async () => {
+    const result = makeRun('off')
+    result.links.push(
+      { key: 'tel-valid', pageUrl: 'https://example.com/', href: 'tel:+81-3-1234-5678', resolvedUrl: 'tel:+81-3-1234-5678', kind: 'tel', verdict: 'ok', redirectCount: 0, isImageLink: false, message: 'tel形式を確認しました。', evidence: [] },
+      { key: 'tel-invalid', pageUrl: 'https://example.com/', href: 'tel:03-1234-5678?token=plain-secret', resolvedUrl: 'tel:03-1234-5678?token=plain-secret', kind: 'tel', verdict: 'ng', redirectCount: 0, isImageLink: false, message: 'tel形式が不正です。', evidence: [] },
+    )
+    const workbook = await loadReport(makeProject(), result)
+    const all = workbook.getWorksheet(REPORT_SHEET_NAMES.all)!
+    const validUrl = findRow(all, '安定キー', 'tel-valid').getCell(columnNumber(all, 'URL')).value
+    const invalidUrl = String(findRow(all, '安定キー', 'tel-invalid').getCell(columnNumber(all, 'URL')).value)
+
+    expect(validUrl).toBe('tel:+81-3-1234-5678')
+    expect(invalidUrl).not.toContain('03-1234-5678')
+    expect(invalidUrl).not.toContain('plain-secret')
+  })
+
   it('半角・全角スペースの差を要約し、期待値と実測値を変更しない', async () => {
     const result = makeRun('off')
     const finding = result.pages[0]!.findings.find(item => item.item === 'title')!

@@ -1,7 +1,7 @@
 import type { InputSnapshot } from '~/shared/types/excel-input'
 import type { RunResult } from '~/shared/types/run'
 import { maskUrlForDisplay } from '~/shared/security/url-security'
-import { maskSecretText } from './ai-masking'
+import { maskSecretText, maskSensitiveUrl } from './ai-masking'
 import { createUrlIdentity } from './url-identity'
 
 const URL_FIELD = /(?:url|href)$/i
@@ -116,6 +116,7 @@ function safeUrl(value: string): string {
 }
 
 function safeUrlOrText(value: string): string {
+  if (/^tel:/iu.test(value)) return maskSensitiveUrl(value).value
   return /^[a-z][a-z0-9+.-]*:/iu.test(value) ? safeUrl(value) : safeText(value)
 }
 

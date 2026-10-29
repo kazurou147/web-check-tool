@@ -126,6 +126,22 @@ export function isSensitiveQueryName(value: string): boolean {
   return SENSITIVE_COMBINATIONS.has(combined)
 }
 
+/** 表示してよい単純なtel URLだけを許可し、パラメータや不審な文字列を除外します。 */
+export function displaySafeTelNumber(value: string): string | undefined {
+  const matched = /^tel:(\+?[0-9](?:[0-9(). -]*[0-9])?)$/iu.exec(value)
+  if (!matched) return undefined
+  const number = matched[1]!
+  const normalized = number.replace(/[(). -]/gu, '')
+  const digits = normalized.replace(/^\+/u, '')
+  return /^\+?\d+$/u.test(normalized) && digits.length >= 3 && digits.length <= 15
+    ? number
+    : undefined
+}
+
+export function isDisplaySafeTelUrl(value: string): boolean {
+  return displaySafeTelNumber(value) !== undefined
+}
+
 function splitQueryName(value: string): string[] {
   return value
     .normalize('NFKC')

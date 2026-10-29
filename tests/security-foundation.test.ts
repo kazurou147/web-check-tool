@@ -8,6 +8,7 @@ import {
   SecurityFoundationError,
 } from '~/shared/security/security-constants'
 import {
+  displaySafeTelNumber,
   hasUrlUserinfo,
   inspectUrlSecrets,
   isSensitiveQueryName,
@@ -94,6 +95,13 @@ describe('Security-A URL安全化', () => {
     expect(masked.value).not.toContain('AKIAEXAMPLE')
     expect(masked.value).not.toContain('abcdef123456')
     expect(masked.sensitiveQueryNames).toEqual(['X-Amz-Credential', 'X-Amz-Signature'])
+  })
+
+  it('単純なtel URLだけを表示可能とし、付加パラメータと過長番号を拒否する', () => {
+    expect(displaySafeTelNumber('tel:03-1234-5678')).toBe('03-1234-5678')
+    expect(displaySafeTelNumber('tel:+81 (3) 1234-5678')).toBe('+81 (3) 1234-5678')
+    expect(displaySafeTelNumber('tel:03-1234-5678?token=secret')).toBeUndefined()
+    expect(displaySafeTelNumber('tel:+1234567890123456')).toBeUndefined()
   })
 
   it('識別用正規化は既存規則どおりHTTP/HTTPSを限定しフラグメントだけを除去する', () => {

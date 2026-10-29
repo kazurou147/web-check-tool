@@ -12,6 +12,7 @@ import type {
 import type { LinkProbe } from './checks/links'
 import { AiMaskingAccumulator } from './ai-masking'
 import { isAbortError, RunCanceledError, throwIfAborted } from './abort'
+import { isDisplaySafeTelUrl } from '~/shared/security/url-security'
 
 export const AI_CONTRACT_VERSION = '1.1.0'
 export const AI_PROMPT_VERSION = '1.2.0'
@@ -145,17 +146,28 @@ export async function buildAiInputBundle(options: BuildAiInputBundleOptions): Pr
       const rawTarget = await getTarget(primary.resolvedUrl, options.probe, targetCache, options.signal)
       throwIfAborted(options.signal)
       const masking = new AiMaskingAccumulator()
+      const telUrl = safeCandidateTelUrl(primary)
+      const sourceText = (value: string, limit: number, side: 'start' | 'end') => (
+        telUrl
+          ? limitCodePoints(masking.telText(value, telUrl), limit, side)
+          : maskAndLimit(masking, 'text', value, limit, side)
+      )
       const source = {
         pageUrl: maskAndLimit(masking, 'url', primary.pageUrl, 4_096, 'start'),
         ...buildSourceNavigation(primary, masking),
-        linkText: maskAndLimit(masking, 'text', primary.linkText, 10_000, 'start'),
-        beforeText: maskAndLimit(masking, 'text', primary.beforeText, AI_SOURCE_CONTEXT_LIMIT, 'end'),
-        afterText: maskAndLimit(masking, 'text', primary.afterText, AI_SOURCE_CONTEXT_LIMIT, 'start'),
+        linkText: sourceText(primary.linkText, 10_000, 'start'),
+        beforeText: sourceText(primary.beforeText, AI_SOURCE_CONTEXT_LIMIT, 'end'),
+        afterText: sourceText(primary.afterText, AI_SOURCE_CONTEXT_LIMIT, 'start'),
       }
-      const sourceReferences = group.candidates.map(candidate => ({
-        linkResultKey: maskAndLimit(masking, 'text', candidate.linkResultKey, 8_192, 'start'),
-        pageUrl: maskAndLimit(masking, 'url', candidate.pageUrl, 4_096, 'start'),
-      }))
+      const sourceReferences = group.candidates.map((candidate) => {
+        const candidateTelUrl = safeCandidateTelUrl(candidate)
+        return {
+          linkResultKey: candidateTelUrl
+            ? limitCodePoints(masking.telText(candidate.linkResultKey, candidateTelUrl), 8_192, 'start')
+            : maskAndLimit(masking, 'text', candidate.linkResultKey, 8_192, 'start'),
+          pageUrl: maskAndLimit(masking, 'url', candidate.pageUrl, 4_096, 'start'),
+        }
+      })
       const target = maskTarget(rawTarget, masking)
       const itemId = `ai_${sha256(`ai-item-v1\n${group.dedupeKey}`)}`
       const inputHash = sha256(stableStringify({ source, sourceReferences, target }))
@@ -422,6 +434,8 @@ function maskTarget(value: RawTarget, masking: AiMaskingAccumulator): AiLinkTarg
 
 function buildSourceNavigation(candidate: AiSourceCandidate, masking: AiMaskingAccumulator): Pick<AiLinkInput['source'], 'linkUrl' | 'urlFragment' | 'isSamePageAnchor'> {
   const linkUrl = resolvedHttpUrl(candidate.resolvedUrl)
+  const telUrl = safeCandidateTelUrl(candidate)
+  if (telUrl) return { linkUrl: maskAndLimit(masking, 'url', telUrl, 4_096, 'start') }
   if (!linkUrl) return {}
   const fragment = extractUrlFragment(linkUrl)
   return {
@@ -429,6 +443,13 @@ function buildSourceNavigation(candidate: AiSourceCandidate, masking: AiMaskingA
     urlFragment: fragment ? maskAndLimit(masking, 'text', fragment, 4_096, 'start') : undefined,
     isSamePageAnchor: fragment ? sameDocumentUrl(candidate.pageUrl, linkUrl) : false,
   }
+}
+
+function safeCandidateTelUrl(candidate: AiSourceCandidate): string | undefined {
+  for (const value of [candidate.resolvedUrl, candidate.href]) {
+    if (isDisplaySafeTelUrl(value)) return value
+  }
+  return undefined
 }
 
 function resolvedHttpUrl(value: string): string | undefined {

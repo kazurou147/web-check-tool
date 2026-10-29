@@ -127,6 +127,10 @@ describe('Phase 4-B JSON結果エクスポート', () => {
       sourceKind: 'img', location: 'img.hero', verdict: 'ng', message: '画像の通信エラーを確認しました。',
       evidence: [`desktop ${imageUrl}: 画像の通信エラーを確認しました。`],
     })
+    prepared.result.links.push(
+      { key: 'tel-json-valid', pageUrl: 'https://example.com/', href: 'tel:+81-3-1234-5678', resolvedUrl: 'tel:+81-3-1234-5678', kind: 'tel', verdict: 'ok', redirectCount: 0, isImageLink: false, message: 'tel形式を確認しました。', evidence: [] },
+      { key: 'tel-json-invalid', pageUrl: 'https://example.com/', href: 'tel:03-1234-5678?token=plain-secret', resolvedUrl: 'tel:03-1234-5678?token=plain-secret', kind: 'tel', verdict: 'ng', redirectCount: 0, isImageLink: false, message: 'tel形式が不正です。', evidence: [] },
+    )
     prepared.result.fatalError = {
       code: 'SAFE',
       message: 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456\nJWT eyJabcdefghijk.abcdefghijk.abcdefghijk / sk-abcdefghijklmnop123456\n連絡先 contact@example.com / 03-1234-5678',
@@ -151,6 +155,9 @@ describe('Phase 4-B JSON結果エクスポート', () => {
     expect(JSON.stringify(exported.result.images[0])).not.toContain('signed-secret-value')
     expect(exported.result.images[0].imageUrl).not.toContain('[MASKED_HIGH_ENTROPY]')
     expect(exported.result.images[0].evidence[0]).not.toContain('[MASKED_HIGH_ENTROPY]')
+    expect(exported.result.links[0]).toMatchObject({ href: 'tel:+81-3-1234-5678', resolvedUrl: 'tel:+81-3-1234-5678' })
+    expect(JSON.stringify(exported.result.links[1])).not.toContain('03-1234-5678')
+    expect(JSON.stringify(exported.result.links[1])).not.toContain('plain-secret')
     expect(hash(await readFile(path))).toBe(before)
   })
 

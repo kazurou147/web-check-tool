@@ -2,7 +2,7 @@ import type { LinkKind, LinkResult, Verdict } from '~/shared/types/run'
 import { NetworkPolicy, NetworkPolicyError } from '../network-policy'
 import { isAbortError, RunCanceledError, throwIfAborted } from '../abort'
 import { maskUrlForDisplay } from '~/shared/security/url-security'
-import { maskSecretText } from '../ai-masking'
+import { maskSecretText, maskSensitiveUrl } from '../ai-masking'
 import { createUrlIdentity } from '../url-identity'
 
 export interface CapturedLink {
@@ -270,6 +270,7 @@ async function readLimitedText(response: Response, maxBytes: number): Promise<st
 }
 
 export function redactUrl(value: string): string {
+  if (/^tel:/iu.test(value)) return maskSensitiveUrl(value).value.slice(0, 4_096)
   try {
     return maskUrlForDisplay(value).value.slice(0, 4_096)
   } catch {

@@ -1,5 +1,5 @@
 import type { AiMaskingSummary } from '~/shared/types/ai'
-import { isSensitiveQueryName } from '~/shared/security/url-security'
+import { displaySafeTelNumber, isSensitiveQueryName } from '~/shared/security/url-security'
 
 export const AI_MASKING_RULE_VERSION = '1.0.0'
 export const AI_MASKING_NOTICE = '自動マスキングは、すべての個人情報や秘密情報の検出を保証するものではありません。外部判定前に内容を確認してください。'
@@ -16,6 +16,12 @@ export class AiMaskingAccumulator {
 
   text(value: string): string {
     const masked = maskSensitiveText(value)
+    this.merge(masked)
+    return masked.value
+  }
+
+  telText(value: string, telUrl: string): string {
+    const masked = maskSensitiveTextForTelLink(value, telUrl)
     this.merge(masked)
     return masked.value
   }
@@ -43,6 +49,7 @@ export class AiMaskingAccumulator {
 
 export function maskSensitiveUrl(value: string): MaskedValue {
   const tracker = createTracker()
+  if (displaySafeTelNumber(value) !== undefined) return tracker.result(value)
   try {
     const url = new URL(value)
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return maskSensitiveTextCore(value, false)
@@ -67,6 +74,25 @@ export function maskSensitiveUrl(value: string): MaskedValue {
     return tracker.result(url.href)
   } catch {
     return maskSensitiveTextCore(value, false)
+  }
+}
+
+export function maskSensitiveTextForTelLink(value: string, telUrl: string): MaskedValue {
+  const telNumber = displaySafeTelNumber(telUrl)
+  if (telNumber === undefined) return maskSensitiveText(value)
+  const wanted = normalizePhoneNumber(telNumber)
+  const preserved: string[] = []
+  const placeholder = '\uE000TEL_PHONE\uE001'
+  const protectedValue = value.replace(/(?:\+?\d[\d().\s-]{1,}\d)/gu, matched => {
+    if (normalizePhoneNumber(matched) !== wanted) return matched
+    preserved.push(matched)
+    return placeholder
+  })
+  const masked = maskSensitiveText(protectedValue)
+  let index = 0
+  return {
+    ...masked,
+    value: masked.value.replaceAll(placeholder, () => preserved[index++] ?? placeholder),
   }
 }
 
@@ -139,6 +165,10 @@ function maskHighEntropy(value: string, tracker: ReturnType<typeof createTracker
     'high_entropy',
     tracker,
   )
+}
+
+function normalizePhoneNumber(value: string): string {
+  return value.replace(/[().\s-]/gu, '')
 }
 
 function isSensitiveKey(value: string): boolean {

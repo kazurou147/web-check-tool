@@ -14,7 +14,7 @@ import {
   verifyAiInputBundle,
   type AiSourceCandidate,
 } from '~/server/services/ai-input'
-import { maskSecretText, maskSensitiveText, maskSensitiveUrl } from '~/server/services/ai-masking'
+import { maskSecretText, maskSensitiveText, maskSensitiveTextForTelLink, maskSensitiveUrl } from '~/server/services/ai-masking'
 import { SafeLinkProbe, type LinkProbe } from '~/server/services/checks/links'
 import { NetworkPolicy } from '~/server/services/network-policy'
 
@@ -70,6 +70,39 @@ describe('Phase 5-A AI入力共通基盤', () => {
     expect(url.value).not.toContain('user:pass')
     expect(url.value).not.toContain('secret')
     expect(url.maskedCategories).toEqual(expect.arrayContaining(['url_credentials', 'url_query_secret']))
+  })
+
+  it.each([
+    'tel:03-1234-5678',
+    'tel:0312345678',
+    'tel:+81-3-1234-5678',
+    'tel:+81 (3) 1234-5678',
+  ])('安全なtel URLの元表記を維持する: %s', (telUrl) => {
+    const once = maskSensitiveUrl(telUrl)
+    const twice = maskSensitiveUrl(once.value)
+
+    expect(once.value).toBe(telUrl)
+    expect(twice.value).toBe(telUrl)
+    expect(once.maskedCount).toBe(0)
+  })
+
+  it('telリンクと一致する電話番号だけを周辺文章に残し、別番号と秘密情報を保護する', () => {
+    const value = '東京 03-1234-5678 ／ 大阪 06-9876-5432 contact@example.com token=plain-secret'
+    const masked = maskSensitiveTextForTelLink(value, 'tel:0312345678')
+
+    expect(masked.value).toContain('03-1234-5678')
+    expect(masked.value).not.toContain('06-9876-5432')
+    expect(masked.value).not.toContain('contact@example.com')
+    expect(masked.value).not.toContain('plain-secret')
+    expect(masked.maskedCategories).toEqual(expect.arrayContaining(['phone', 'email', 'named_secret']))
+  })
+
+  it('不正または付加情報を含むtel URLは電話番号と秘密値を保護する', () => {
+    const masked = maskSensitiveUrl('tel:03-1234-5678?token=plain-secret')
+
+    expect(masked.value).not.toContain('03-1234-5678')
+    expect(masked.value).not.toContain('plain-secret')
+    expect(masked.maskedCategories).toEqual(expect.arrayContaining(['phone', 'named_secret']))
   })
 
   it.each([
@@ -365,6 +398,37 @@ describe('Phase 5-A AI入力共通基盤', () => {
     expect(probe).not.toHaveBeenCalled()
     expect(bundle.items[0].target.fetchStatus).toBe('unsupported_protocol')
     expect(JSON.stringify(bundle)).not.toContain('person@example.com')
+  })
+
+  it('telリンクは通信せず、対象番号だけをリンク先・文言・周辺文章・元リンクに維持する', async () => {
+    const probe = vi.fn()
+    const telUrl = 'tel:+81-3-1234-5678'
+    const bundle = await buildAiInputBundle({
+      projectId,
+      runId,
+      candidates: [{
+        ...candidate(`https://source.example/company|link|0|${telUrl}`),
+        href: telUrl,
+        resolvedUrl: telUrl,
+        linkText: '+81-3-1234-5678',
+        beforeText: '東京 +81 (3) 1234-5678 ／ 大阪 06-9876-5432',
+        afterText: '連絡先 contact@example.com token=plain-secret',
+      }],
+      probe: { probe } as LinkProbe,
+      signingKey,
+      createBundleId: () => bundleId,
+    })
+    const item = bundle.items[0]!
+
+    expect(probe).not.toHaveBeenCalled()
+    expect(item.target).toMatchObject({ normalizedUrl: telUrl, fetchStatus: 'unsupported_protocol' })
+    expect(item.source.linkUrl).toBe(telUrl)
+    expect(item.source.linkText).toBe('+81-3-1234-5678')
+    expect(item.source.beforeText).toContain('+81 (3) 1234-5678')
+    expect(item.source.beforeText).not.toContain('06-9876-5432')
+    expect(item.source.afterText).not.toContain('contact@example.com')
+    expect(item.source.afterText).not.toContain('plain-secret')
+    expect(item.sourceReferences[0]!.linkResultKey).toContain(telUrl)
   })
 
   it('入力スキーマとHMAC整合性を検証し、改変を拒否する', async () => {

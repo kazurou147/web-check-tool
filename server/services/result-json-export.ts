@@ -95,7 +95,7 @@ class ExportMaskingAccumulator {
   }
 
   url(value: string): string {
-    const masked = /^https?:\/\//i.test(value) ? maskSensitiveUrl(value) : maskSecretText(value)
+    const masked = /^(?:https?:\/\/|tel:)/i.test(value) ? maskSensitiveUrl(value) : maskSecretText(value)
     this.merge(masked)
     return masked.value
   }
