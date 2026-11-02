@@ -1,5 +1,7 @@
 # Webサイト納品前チェックツール
 
+[![CI](https://github.com/kazurou147/web-check-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/kazurou147/web-check-tool/actions/workflows/ci.yml)
+
 Web制作の納品前確認を、自動化・一元管理するNuxt 3製のローカルWebアプリです。
 
 Excelで管理している確認項目を取り込み、Webサイトを実際に巡回して、メタ情報・Googleタグ・リンク・画像を検査します。案件ごとの進捗や過去の結果を画面で確認でき、関係者へ共有しやすいExcelレポートも出力できます。
