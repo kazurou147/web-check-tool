@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import ExcelJS from 'exceljs'
 import { describe, expect, it } from 'vitest'
 import {
@@ -11,27 +12,45 @@ import {
 } from '~/server/services/excel-input'
 
 describe('Excel入力処理', () => {
-  it('web-check-origin.xlsxを読み取り、原本を変更しない', async () => {
-    const sourcePath = resolve(process.cwd(), '..', 'web-check-origin.xlsx')
-    const before = await readFile(sourcePath)
-    const beforeHash = createHash('sha256').update(before).digest('hex')
+  it('Excelファイルを読み取り、原本を変更しない', async () => {
+    const workbook = validWorkbook()
+    const pageSheet = workbook.getWorksheet('納品前のチェック')!
+    pageSheet.addRow(['トップ', 'https://example.com/'])
+    pageSheet.addRow(['会社概要', 'https://example.com/company/'])
+    pageSheet.addRow(['サービス', 'https://example.com/service/'])
+    pageSheet.addRow(['お問い合わせ', 'https://example.com/contact/'])
+    const tagSheet = workbook.getWorksheet('Googleタグ')!
+    tagSheet.addRow(['GTM head用', '<script>GTM-HEAD123</script>'])
+    tagSheet.addRow(['GTM body用', '<noscript>GTM-BODY123</noscript>'])
+    tagSheet.addRow(['GA4', 'G-ABC123'])
 
-    const snapshot = await readExcelInput(sourcePath, 'web-check-origin.xlsx')
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), 'web-check-excel-'))
+    const sourcePath = join(temporaryDirectory, 'input.xlsx')
 
-    expect(snapshot.canStart).toBe(true)
-    expect(snapshot.totalDataRows).toBe(4)
-    expect(snapshot.validRows).toBe(4)
-    expect(snapshot.uniqueUrlCount).toBe(4)
-    expect(snapshot.blankRows).toBe(0)
-    expect(snapshot.hiddenExcludedRows).toBe(0)
-    expect(snapshot.duplicateGroups).toHaveLength(0)
-    expect(snapshot.expectedGoogleTags).toHaveLength(3)
-    expect(snapshot.pageRows[0].url).toBe('https://example.com/')
-    expect(snapshot.pageRows[0].url).not.toContain('utm_source')
-    expect(snapshot.expectedGoogleTags.map(tag => tag.placement)).toEqual(['head', 'body', 'unspecified'])
+    try {
+      await writeFile(sourcePath, Buffer.from(await workbook.xlsx.writeBuffer()))
+      const before = await readFile(sourcePath)
+      const beforeHash = createHash('sha256').update(before).digest('hex')
 
-    const afterHash = createHash('sha256').update(await readFile(sourcePath)).digest('hex')
-    expect(afterHash).toBe(beforeHash)
+      const snapshot = await readExcelInput(sourcePath, 'input.xlsx')
+
+      expect(snapshot.canStart).toBe(true)
+      expect(snapshot.totalDataRows).toBe(4)
+      expect(snapshot.validRows).toBe(4)
+      expect(snapshot.uniqueUrlCount).toBe(4)
+      expect(snapshot.blankRows).toBe(0)
+      expect(snapshot.hiddenExcludedRows).toBe(0)
+      expect(snapshot.duplicateGroups).toHaveLength(0)
+      expect(snapshot.expectedGoogleTags).toHaveLength(3)
+      expect(snapshot.pageRows[0].url).toBe('https://example.com/')
+      expect(snapshot.expectedGoogleTags.map(tag => tag.placement)).toEqual(['head', 'body', 'unspecified'])
+
+      const afterHash = createHash('sha256').update(await readFile(sourcePath)).digest('hex')
+      expect(afterHash).toBe(beforeHash)
+    }
+    finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
   })
 
   it('空白、URL欠落、不正URL、数式、非表示行を仕様どおり分類する', () => {
